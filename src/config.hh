@@ -1,0 +1,69 @@
+/* User-configurable settings.
+ *
+ * NB: all strings are locale bound, RFA provides no Unicode support.
+ */
+
+#ifndef __CONFIG_HH__
+#define __CONFIG_HH__
+#pragma once
+
+#include <string>
+#include <sstream>
+#include <vector>
+
+namespace usagi
+{
+
+	struct config_t
+	{
+		config_t();
+
+//  Windows registry key path.
+		std::string key;
+
+//  TREP-RT service name, e.g. IDN_RDF.
+		std::string service_name;
+
+//  Default TREP-RT RSSL port, e.g. 14002, 14003.
+		std::string rssl_default_port;
+
+//  RFA session name.
+		std::string session_name;
+
+//  RFA application logger monitor name.
+		std::string monitor_name;
+
+//  RFA event queue name.
+		std::string event_queue_name;
+
+//  RFA connection name.
+		std::string connection_name;
+
+//  RFA publisher name.
+		std::string publisher_name;
+
+//  RFA vendor name.
+		std::string vendor_name;
+	};
+
+	inline
+	std::ostream& operator<< (std::ostream& o, const config_t& config) {
+		std::ostringstream ss;
+		o << "config_t: { "
+			 " \"service_name\": \"" << config.service_name << "\""
+			", \"rssl_default_port\": \"" << config.rssl_default_port << "\""
+			", \"session_name\": \"" << config.session_name << "\""
+			", \"monitor_name\": \"" << config.monitor_name << "\""
+			", \"event_queue_name\": \"" << config.event_queue_name << "\""
+			", \"connection_name\": \"" << config.connection_name << "\""
+			", \"publisher_name\": \"" << config.publisher_name << "\""
+			", \"vendor_name\": \"" << config.vendor_name << "\""
+			" }";
+		return o;
+	}
+
+} /* namespace usagi */
+
+#endif /* __CONFIG_HH__ */
+
+/* eof */
