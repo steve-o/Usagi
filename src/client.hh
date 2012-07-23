@@ -124,7 +124,7 @@ namespace usagi
 		int data_state_;
 
 /** Performance Counters **/
-		boost::posix_time::ptime last_activity_;
+		boost::posix_time::ptime creation_time_, last_activity_;
 		uint32_t cumulative_stats_[CLIENT_PC_MAX];
 		uint32_t snap_stats_[CLIENT_PC_MAX];
 

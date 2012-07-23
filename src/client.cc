@@ -31,7 +31,8 @@ usagi::client_t::client_t (
 	usagi::provider_t& provider,
 	const rfa::common::Handle* handle
 	) :
-	last_activity_ (boost::posix_time::microsec_clock::universal_time()),
+	creation_time_ (boost::posix_time::second_clock::universal_time()),
+	last_activity_ (creation_time_),
 	provider_ (provider),
 	handle_ (handle),
 	rwf_major_version_ (0),
@@ -51,12 +52,19 @@ usagi::client_t::client_t (
 
 usagi::client_t::~client_t()
 {
+	using namespace boost::posix_time;
+	auto uptime = second_clock::universal_time() - creation_time_;
+	VLOG(3) << prefix_ << ": Summary: {"
+		 " \"Uptime\": \"" << to_simple_string (uptime) << "\""
+		", \"RfaEventsReceived\": " << cumulative_stats_[CLIENT_PC_RFA_EVENTS_RECEIVED] <<
+		", \"RfaMessagesSent\": " << cumulative_stats_[CLIENT_PC_RFA_MSGS_SENT] <<
+		" }";
 }
 	
 bool
 usagi::client_t::getAssociatedMetaInfo()
 {
-	last_activity_ = boost::posix_time::microsec_clock::universal_time();
+	last_activity_ = boost::posix_time::second_clock::universal_time();
 
 /* Store negotiated Reuters Wire Format version information. */
 	rfa::data::Map map;
@@ -78,7 +86,7 @@ usagi::client_t::processEvent (
 {
 	VLOG(1) << event_;
 	cumulative_stats_[CLIENT_PC_RFA_EVENTS_RECEIVED]++;
-	last_activity_ = boost::posix_time::microsec_clock::universal_time();
+	last_activity_ = boost::posix_time::second_clock::universal_time();
 	switch (event_.getType()) {
 	case rfa::sessionLayer::OMMSolicitedItemEventEnum:
 		processOMMSolicitedItemEvent (static_cast<const rfa::sessionLayer::OMMSolicitedItemEvent&>(event_));
@@ -474,37 +482,10 @@ usagi::client_t::sendBlankResponse (
 	response.setAttribInfo (attribInfo);
 
 /* 4.3.1 RespMsg.Payload */
-/* 6.2.8 Quality of Service. */
-	rfa::common::QualityOfService QoS;
-/* Timeliness: age of data, either real-time, unspecified delayed timeliness,
- * unspecified timeliness, or any positive number representing the actual
- * delay in seconds.
- */
-	QoS.setTimeliness (rfa::common::QualityOfService::realTime);
-/* Rate: minimum period of change in data, either tick-by-tick, just-in-time
- * filtered rate, unspecified rate, or any positive number representing the
- * actual rate in milliseconds.
- */
-	QoS.setRate (rfa::common::QualityOfService::tickByTick);
-	response.setQualityOfService (QoS);
-
 // not std::map :(  derived from rfa::common::Data
 	rfa::data::FieldList fields;
 	fields.setAssociatedMetaInfo (getRwfMajorVersion(), getRwfMinorVersion());
 	fields.setInfo (kDictionaryId, kFieldListId);
-
-	rfa::data::FieldListWriteIterator it;
-	it.start (fields);
-
-	rfa::data::FieldEntry field (true);
-	rfa::data::DataBuffer dataBuffer (true);
-	rfa::data::Real64 real64;
-
-	field.setFieldID (kRdmRdnDisplayId);
-	dataBuffer.setUInt32 (100);
-	field.setData (dataBuffer), it.bind (field);
-
-	it.complete();
 /* Set a reference to field list, not a copy */
 	response.setPayload (fields);
 

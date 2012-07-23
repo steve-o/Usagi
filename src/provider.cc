@@ -31,6 +31,8 @@ usagi::provider_t::provider_t (
 	std::shared_ptr<usagi::rfa_t> rfa,
 	std::shared_ptr<rfa::common::EventQueue> event_queue
 	) :
+	creation_time_ (boost::posix_time::second_clock::universal_time()),
+	last_activity_ (creation_time_),
 	config_ (config),
 	rfa_ (rfa),
 	event_queue_ (event_queue),
@@ -55,12 +57,23 @@ usagi::provider_t::~provider_t()
 		omm_provider_->unregisterClient (error_item_handle_), error_item_handle_ = nullptr;
 	omm_provider_.reset();
 	session_.reset();
+/* Summary output */
+	using namespace boost::posix_time;
+	auto uptime = second_clock::universal_time() - creation_time_;
+	VLOG(3) << "Provider summary: {"
+		 " \"Uptime\": \"" << to_simple_string (uptime) << "\""
+		", \"MsgsSent\": " << cumulative_stats_[PROVIDER_PC_MSGS_SENT] <<
+		", \"RfaEventsReceived\": " << cumulative_stats_[PROVIDER_PC_RFA_EVENTS_RECEIVED] <<
+		", \"OmmCommandErrors\": " << cumulative_stats_[PROVIDER_PC_OMM_CMD_ERRORS] <<
+		", \"ConnectionEvents\": " << cumulative_stats_[PROVIDER_PC_CONNECTION_EVENTS_RECEIVED] <<
+		", \"ClientSessions\": " << cumulative_stats_[PROVIDER_PC_CLIENT_SESSION_ACCEPTED] <<
+		" }";
 }
 
 bool
 usagi::provider_t::init()
 {
-	last_activity_ = boost::posix_time::microsec_clock::universal_time();
+	last_activity_ = boost::posix_time::second_clock::universal_time();
 
 /* 7.2.1 Configuring the Session Layer Package.
  */
@@ -125,7 +138,7 @@ usagi::provider_t::createItemStream (
 	assert (true == status.second);
 	assert (directory_.end() != directory_.find (key));
 	DVLOG(4) << "Directory size: " << directory_.size();
-	last_activity_ = boost::posix_time::microsec_clock::universal_time();
+	last_activity_ = boost::posix_time::second_clock::universal_time();
 	return true;
 }
 
@@ -143,7 +156,7 @@ usagi::provider_t::send (
 	assert (nullptr != item_stream.token);
 	send (msg, *item_stream.token, nullptr);
 	cumulative_stats_[PROVIDER_PC_MSGS_SENT]++;
-	last_activity_ = boost::posix_time::microsec_clock::universal_time();
+	last_activity_ = boost::posix_time::second_clock::universal_time();
 	return true;
 }
 
@@ -305,7 +318,7 @@ usagi::provider_t::acceptClientSession (
 {
 	VLOG(2) << "Accepting new client session request.";
 
-	std::unique_ptr<client_t> client (new client_t (*this, rfa_, handle));
+	std::unique_ptr<client_t> client (new client_t (*this, handle));
 	if (!(bool)client)
 		return false;
 

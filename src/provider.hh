@@ -148,7 +148,7 @@ namespace usagi
 		std::unordered_map<std::string, std::weak_ptr<item_stream_t>> directory_;
 
 /** Performance Counters **/
-		boost::posix_time::ptime last_activity_;
+		boost::posix_time::ptime creation_time_, last_activity_;
 		uint32_t cumulative_stats_[PROVIDER_PC_MAX];
 		uint32_t snap_stats_[PROVIDER_PC_MAX];
 	};
