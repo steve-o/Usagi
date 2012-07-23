@@ -44,6 +44,9 @@ namespace usagi
 
 //  RFA vendor name.
 		std::string vendor_name;
+
+//  Client session capacity.
+		size_t session_capacity;
 	};
 
 	inline
@@ -58,6 +61,7 @@ namespace usagi
 			", \"connection_name\": \"" << config.connection_name << "\""
 			", \"publisher_name\": \"" << config.publisher_name << "\""
 			", \"vendor_name\": \"" << config.vendor_name << "\""
+			", \"session_capacity\": " << config.session_capacity << 
 			" }";
 		return o;
 	}

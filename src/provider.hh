@@ -29,40 +29,12 @@ namespace usagi
 		PROVIDER_PC_RFA_MSGS_SENT,
 		PROVIDER_PC_RFA_EVENTS_RECEIVED,
 		PROVIDER_PC_RFA_EVENTS_DISCARDED,
-		PROVIDER_PC_OMM_ITEM_EVENTS_RECEIVED,
-		PROVIDER_PC_OMM_ITEM_EVENTS_DISCARDED,
-		PROVIDER_PC_RESPONSE_MSGS_RECEIVED,
-		PROVIDER_PC_RESPONSE_MSGS_DISCARDED,
-		PROVIDER_PC_MMT_LOGIN_RESPONSE_RECEIVED,
-		PROVIDER_PC_MMT_LOGIN_RESPONSE_DISCARDED,
-		PROVIDER_PC_MMT_LOGIN_RESPONSE_MALFORMED,
-		PROVIDER_PC_MMT_LOGIN_RESPONSE_VALIDATED,
-		PROVIDER_PC_MMT_LOGIN_SUCCESS_RECEIVED,
-		PROVIDER_PC_MMT_LOGIN_SUSPECT_RECEIVED,
-		PROVIDER_PC_MMT_LOGIN_CLOSED_RECEIVED,
 		PROVIDER_PC_OMM_CMD_ERRORS,
-		PROVIDER_PC_MMT_LOGIN_VALIDATED,
-		PROVIDER_PC_MMT_LOGIN_MALFORMED,
-		PROVIDER_PC_MMT_LOGIN_SENT,
-		PROVIDER_PC_MMT_DIRECTORY_VALIDATED,
-		PROVIDER_PC_MMT_DIRECTORY_MALFORMED,
-		PROVIDER_PC_MMT_DIRECTORY_SENT,
 		PROVIDER_PC_CONNECTION_EVENTS_RECEIVED,
 		PROVIDER_PC_OMM_ACTIVE_CLIENT_SESSION_RECEIVED,
 		PROVIDER_PC_CLIENT_SESSION_REJECTED,
 		PROVIDER_PC_CLIENT_SESSION_ACCEPTED,
 		PROVIDER_PC_OMM_INACTIVE_CLIENT_SESSION_RECEIVED,
-		PROVIDER_PC_OMM_SOLICITED_ITEM_EVENTS_RECEIVED,
-		PROVIDER_PC_OMM_SOLICITED_ITEM_EVENTS_DISCARDED,
-		PROVIDER_PC_REQUEST_MSGS_RECEIVED,
-		PROVIDER_PC_REQUEST_MSGS_DISCARDED,
-		PROVIDER_PC_MMT_LOGIN_REQUEST_RECEIVED,
-		PROVIDER_PC_MMT_LOGIN_REQUEST_REJECTED,
-		PROVIDER_PC_MMT_LOGIN_REQUEST_ACCEPTED,
-		PROVIDER_PC_MMT_DIRECTORY_REQUEST_RECEIVED,
-		PROVIDER_PC_MMT_DICTIONARY_REQUEST_RECEIVED,
-		PROVIDER_PC_MMT_MARKET_PRICE_REQUEST_RECEIVED,
-		PROVIDER_PC_TOKENS_GENERATED,
 /* marker */
 		PROVIDER_PC_MAX
 	};
@@ -81,6 +53,8 @@ namespace usagi
 		rfa::sessionLayer::ItemToken* token;
 	};
 
+	class client_t;
+
 	class provider_t :
 		public rfa::common::Client,
 		boost::noncopyable
@@ -98,42 +72,28 @@ namespace usagi
 		void processEvent (const rfa::common::Event& event) override;
 
 		uint8_t getRwfMajorVersion() {
-			return rwf_major_version_;
+			return min_rwf_major_version_;
 		}
 		uint8_t getRwfMinorVersion() {
-			return rwf_minor_version_;
+			return min_rwf_minor_version_;
 		}
 
 	private:
 		void processConnectionEvent (const rfa::sessionLayer::ConnectionEvent& event);
 		void processOMMActiveClientSessionEvent (const rfa::sessionLayer::OMMActiveClientSessionEvent& event);
 		void processOMMInactiveClientSessionEvent (const rfa::sessionLayer::OMMInactiveClientSessionEvent& event);
-		void processOMMItemEvent (const rfa::sessionLayer::OMMItemEvent& event);
-		void processOMMSolicitedItemEvent (const rfa::sessionLayer::OMMSolicitedItemEvent& event);
-		void processReqMsg (const rfa::message::ReqMsg& msg, rfa::sessionLayer::RequestToken& token);
-		void processLoginRequest (const rfa::message::ReqMsg& msg, rfa::sessionLayer::RequestToken& token);
-		void processDirectoryRequest (const rfa::message::ReqMsg& msg);
-		void processDictionaryRequest (const rfa::message::ReqMsg& msg);
-		void processMarketPriceRequest (const rfa::message::ReqMsg& msg);
-                void processRespMsg (const rfa::message::RespMsg& msg);
-                void processLoginResponse (const rfa::message::RespMsg& msg);
-                void processLoginSuccess (const rfa::message::RespMsg& msg);
-                void processLoginSuspect (const rfa::message::RespMsg& msg);
-                void processLoginClosed (const rfa::message::RespMsg& msg);
 		void processOMMCmdErrorEvent (const rfa::sessionLayer::OMMCmdErrorEvent& event);
 
 		bool rejectClientSession (const rfa::common::Handle* handle);
 		bool acceptClientSession (const rfa::common::Handle* handle);
-		bool rejectLogin (const rfa::message::ReqMsg& msg, rfa::sessionLayer::RequestToken& login_token);
-		bool acceptLogin (const rfa::message::ReqMsg& msg, rfa::sessionLayer::RequestToken& login_token);
-		bool sendDirectoryResponse();
-		void getServiceDirectory (rfa::data::Map& map);
-		void getServiceFilterList (rfa::data::FilterList& filterList);
-		void getServiceInformation (rfa::data::ElementList& elementList);
-		void getServiceCapabilities (rfa::data::Array& capabilities);
-		void getServiceDictionaries (rfa::data::Array& dictionaries);
-		void getServiceState (rfa::data::ElementList& elementList);
-		bool resetTokens();
+
+		void getDirectoryResponse (rfa::message::RespMsg* msg, uint8_t response_type);
+		void getServiceDirectory (rfa::data::Map* map);
+		void getServiceFilterList (rfa::data::FilterList* filterList);
+		void getServiceInformation (rfa::data::ElementList* elementList);
+		void getServiceCapabilities (rfa::data::Array* capabilities);
+		void getServiceDictionaries (rfa::data::Array* dictionaries);
+		void getServiceState (rfa::data::ElementList* elementList);
 
 		uint32_t send (rfa::common::Msg& msg, rfa::sessionLayer::ItemToken& token, void* closure) throw (rfa::common::InvalidUsageException);
 		uint32_t submit (rfa::common::Msg& msg, rfa::sessionLayer::ItemToken& token, void* closure) throw (rfa::common::InvalidUsageException);
@@ -157,19 +117,27 @@ namespace usagi
 		rfa::common::Handle* connection_item_handle_;
 /* RFA Listen event consumer */
 		rfa::common::Handle* listen_item_handle_;
-/* RFA Client Session event consumer */
-		std::vector<rfa::common::Handle*> session_item_handles_;
 /* RFA Error Item event consumer */
 		rfa::common::Handle* error_item_handle_;
-/* RFA Item event consumer */
-		rfa::common::Handle* item_handle_;
+
+/* RFA Client Sessions */
+		std::vector<std::unique_ptr<client_t>> clients_;
+
+		friend client_t;
 
 /* Reuters Wire Format versions. */
-		uint8_t rwf_major_version_;
-		uint8_t rwf_minor_version_;
+		uint8_t min_rwf_major_version_;
+		uint8_t min_rwf_minor_version_;
+
+/* Pre-allocated shared resource. */
+		rfa::data::Map map_;
+		rfa::message::AttribInfo attribInfo_;
+		rfa::common::RespStatus status_;
 
 /* RFA can reject new client requests whilst maintaining current connected sessions.
  */
+		bool is_accepting_connections_;
+		bool is_accepting_requests_;
 		bool is_muted_;
 
 /* Last RespStatus details. */

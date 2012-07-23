@@ -14,7 +14,8 @@ usagi::config_t::config_t() :
 	event_queue_name ("EventQueueName"),
 	connection_name ("ConnectionName"),
 	publisher_name ("PublisherName"),
-	vendor_name ("VendorName")
+	vendor_name ("VendorName"),
+	session_capacity (2)
 {
 /* C++11 initializer lists not supported in MSVC2010 */
 }

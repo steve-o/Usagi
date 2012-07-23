@@ -56,6 +56,7 @@ add_definitions(
 # source files
 
 set(cxx-sources
+	src/client.cc
 	src/config.cc
 	src/error.cc
 	src/main.cc
