@@ -322,6 +322,52 @@ usagi::client_t::acceptLogin (
 	response.setRespType (rfa::message::RespMsg::RefreshEnum);
 	response.setIndicationMask (rfa::message::RespMsg::RefreshCompleteFlag);
 
+/* 7.5.9.5 Create or re-use a request attribute object (4.2.4) */
+	rfa::message::AttribInfo attribInfo;
+/* RDM 3.2.4 AttribInfo: Name is required, NameType is recommended: default is USER_NAME (1) */
+	attribInfo.setNameType (login_msg.getAttribInfo().getNameType());
+	attribInfo.setName (login_msg.getAttribInfo().getName());
+/* RDM 3.3.2 Login Response Elements */
+	rfa::data::ElementList el;
+	rfa::data::ElementListWriteIterator it;
+	rfa::data::ElementEntry entry;
+	rfa::data::DataBuffer dataBuffer;
+	it.start (el);
+/* Reflect back DACS authentication parameters. */
+	if (login_msg.getAttribInfo().getHintMask() & rfa::message::AttribInfo::AttribFlag)
+	{
+/* RDM Table 52: RFA will raise a warning if request & reponse differ. */
+	}
+/* Images and & updates could be stale. */
+	entry.setName (rfa::rdm::ENAME_ALLOW_SUSPECT_DATA);
+	dataBuffer.setUInt (1);
+	entry.setData (dataBuffer);
+	it.bind (entry);
+/* No permission expressions. */
+	entry.setName (rfa::rdm::ENAME_PROV_PERM_EXP);
+	dataBuffer.setUInt (0);
+	entry.setData (dataBuffer);
+	it.bind (entry);
+/* No permission profile. */
+	entry.setName (rfa::rdm::ENAME_PROV_PERM_PROF);
+	dataBuffer.setUInt (0);
+	entry.setData (dataBuffer);
+	it.bind (entry);
+/* Downstream application drives stream recovery. */
+	entry.setName (rfa::rdm::ENAME_SINGLE_OPEN);
+	dataBuffer.setUInt (0);
+	entry.setData (dataBuffer);
+	it.bind (entry);
+/* Batch requests not supported. */
+/* OMM posts not supported. */
+/* Optimized pause and resume not supported. */
+/* Views not supported. */
+/* Warm standby not supported. */
+/* Binding complete. */
+	it.complete();
+	attribInfo.setAttrib (el);
+	response.setAttribInfo (attribInfo);
+
 	rfa::common::RespStatus status;
 /* Item interaction state: RDM 3.2.2 RespMsg: Open. */
 	status.setStreamState (rfa::common::RespStatus::OpenEnum);
