@@ -110,13 +110,19 @@ usagi::client_t::processOMMSolicitedItemEvent (
 	cumulative_stats_[CLIENT_PC_OMM_SOLICITED_ITEM_EVENTS_RECEIVED]++;
 	const rfa::common::Msg& msg = item_event.getMsg();
 
+	if (msg.isBlank()) {
+		cumulative_stats_[CLIENT_PC_OMM_SOLICITED_ITEM_EVENTS_DISCARDED]++;
+		LOG(WARNING) << prefix_ << "Discarding blank solicited message: " << msg;
+		return;
+	}
+
 	switch (msg.getMsgType()) {
 	case rfa::message::ReqMsgEnum:
 		processReqMsg (static_cast<const rfa::message::ReqMsg&>(msg), item_event.getRequestToken());
 		break;
 	default:
 		cumulative_stats_[CLIENT_PC_OMM_SOLICITED_ITEM_EVENTS_DISCARDED]++;
-		LOG(WARNING) << prefix_ << "Uncaught: " << msg;
+		LOG(WARNING) << prefix_ << "Uncaught solicited message: " << msg;
 		break;
 	}
 }
@@ -200,25 +206,29 @@ usagi::client_t::processLoginRequest (
 	static const uint8_t pause_request     = rfa::message::ReqMsg::PauseFlag;
 
 	try {
+/* Reject on RFA validation failing. */
 		if (rfa::message::MsgValidationError == validation_status) 
 		{
 			rejectLogin (login_msg, login_token);
 			return;
 		}
 
-/* RDM 3.2.4: All message types except GenericMsg should include an AttribInfo.
- * RFA example code verifies existence of AttribInfo with an assertion.
- */
-		CHECK(!login_msg.isBlank());
-		CHECK(0 != (login_msg.getHintMask() & rfa::message::ReqMsg::AttribInfoFlag));
-		CHECK(rfa::message::AttribInfo::NameFlag     == (login_msg.getAttribInfo().getHintMask() & rfa::message::AttribInfo::NameFlag));
-		CHECK(rfa::message::AttribInfo::NameTypeFlag == (login_msg.getAttribInfo().getHintMask() & rfa::message::AttribInfo::NameTypeFlag));
 		const bool is_streaming_request = ((login_msg.getInteractionType() == streaming_request)
 						|| (login_msg.getInteractionType() == (streaming_request | pause_request)));
 		const bool is_pause_request     = (login_msg.getInteractionType() == pause_request);
 
+/* RDM 3.2.4: All message types except GenericMsg should include an AttribInfo.
+ * RFA example code verifies existence of AttribInfo with an assertion.
+ */
+		const bool has_attribinfo = (0 != (login_msg.getHintMask() & rfa::message::ReqMsg::AttribInfoFlag));
+		const bool has_name = has_attribinfo && (rfa::message::AttribInfo::NameFlag == (login_msg.getAttribInfo().getHintMask() & rfa::message::AttribInfo::NameFlag));
+		const bool has_nametype = has_attribinfo && (rfa::message::AttribInfo::NameTypeFlag == (login_msg.getAttribInfo().getHintMask() & rfa::message::AttribInfo::NameTypeFlag));
 
-		if (!is_streaming_request && !is_pause_request)
+/* invalid RDM login. */
+		if ((!is_streaming_request && !is_pause_request)
+			|| !has_attribinfo
+			|| !has_name
+			|| !has_nametype)
 		{
 			rejectLogin (login_msg, login_token);
 		}
@@ -416,6 +426,10 @@ usagi::client_t::acceptLogin (
 	return true;
 }
 
+/* RDM 4.2.1 ReqMsg
+ * Streaming request or Nonstreaming request. No special semantics or
+ * restrictions. Pause request is not supported.
+ */
 void
 usagi::client_t::processDirectoryRequest (
 	const rfa::message::ReqMsg& request_msg,
@@ -423,8 +437,55 @@ usagi::client_t::processDirectoryRequest (
 	)
 {
 	cumulative_stats_[CLIENT_PC_MMT_DIRECTORY_REQUEST_RECEIVED]++;
+/* Pass through RFA validation and report exceptions */
+	uint8_t validation_status = rfa::message::MsgValidationError;
 	try {
-		sendDirectoryResponse (request_token);
+/* 4.2.8 Message Validation. */
+		RFA_String warningText;
+		validation_status = request_msg.validateMsg (&warningText);
+		cumulative_stats_[CLIENT_PC_MMT_DIRECTORY_REQUEST_VALIDATED]++;
+		if (rfa::message::MsgValidationWarning == validation_status)
+			LOG(WARNING) << prefix_ << "MMT_DIRECTORY::validateMsg: { \"warningText\": \"" << warningText << "\" }";
+	} catch (rfa::common::InvalidUsageException& e) {
+		cumulative_stats_[CLIENT_PC_MMT_DIRECTORY_REQUEST_MALFORMED]++;
+		LOG(WARNING) << prefix_ <<
+			"MMT_DIRECTORY::InvalidUsageException: { " <<
+			  "\"StatusText\": \"" << e.getStatus().getStatusText() << "\""
+			", " << request_msg <<
+			", \"RequestToken\": " << (intptr_t)&request_token <<
+			" }";
+	}
+
+	static const uint8_t snapshot_request  = rfa::message::ReqMsg::InitialImageFlag;
+	static const uint8_t streaming_request = snapshot_request | rfa::message::ReqMsg::InterestAfterRefreshFlag;
+
+	try {
+/* RDM 4.2.4 AttribInfo required for ReqMsg. */
+		const bool has_attribinfo = (0 != (request_msg.getHintMask() & rfa::message::ReqMsg::AttribInfoFlag));
+
+		const bool is_snapshot_request  = (request_msg.getInteractionType() == snapshot_request);
+		const bool is_streaming_request = (request_msg.getInteractionType() == streaming_request);
+
+		if ((!is_snapshot_request && !is_streaming_request)
+			|| !has_attribinfo)
+		{
+			return;
+		}
+
+/* Filtering of directory contents. */
+		const bool has_datamask = (0 != (request_msg.getAttribInfo().getHintMask() & rfa::message::AttribInfo::DataMaskFlag));
+		const uint32_t filter_mask = has_datamask ? request_msg.getAttribInfo().getDataMask() : UINT32_MAX;
+/* Provides ServiceName */
+		if (0 != (request_msg.getAttribInfo().getHintMask() & rfa::message::AttribInfo::ServiceNameFlag))
+		{
+			const char* service_name = request_msg.getAttribInfo().getServiceName().c_str();
+			sendDirectoryResponse (request_token, service_name, filter_mask);
+		}
+/* Provide all services directory. */
+		else
+		{
+			sendDirectoryResponse (request_token, nullptr, filter_mask);
+		}
 /* ignore any error */
 	} catch (rfa::common::InvalidUsageException& e) {
 		LOG(ERROR) << prefix_ << "MMT_DIRECTORY::InvalidUsageException: { "
@@ -569,14 +630,16 @@ usagi::client_t::processItemRequest (
  */
 bool
 usagi::client_t::sendDirectoryResponse (
-	rfa::sessionLayer::RequestToken& request_token
+	rfa::sessionLayer::RequestToken& request_token,
+	const char* service_name,
+	uint32_t filter_mask
 	)
 {
 	VLOG(2) << prefix_ << "Sending directory response.";
 
 /* 7.5.9.1 Create a response message (4.2.2) */
 	rfa::message::RespMsg response;
-	provider_.getDirectoryResponse (&response, rfa::rdm::REFRESH_SOLICITED);
+	provider_.getDirectoryResponse (&response, rwf_major_version_, rwf_minor_version_, service_name, filter_mask, rfa::rdm::REFRESH_SOLICITED);
 
 /* 4.2.8 Message Validation.  RFA provides an interface to verify that
  * constructed messages of these types conform to the Reuters Domain

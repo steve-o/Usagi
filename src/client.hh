@@ -41,10 +41,14 @@ namespace usagi
 		CLIENT_PC_MMT_LOGIN_RESPONSE_VALIDATED,
 		CLIENT_PC_MMT_LOGIN_RESPONSE_MALFORMED,
 		CLIENT_PC_MMT_DIRECTORY_REQUEST_RECEIVED,
+		CLIENT_PC_MMT_DIRECTORY_REQUEST_VALIDATED,
+		CLIENT_PC_MMT_DIRECTORY_REQUEST_MALFORMED,
 		CLIENT_PC_MMT_DIRECTORY_VALIDATED,
 		CLIENT_PC_MMT_DIRECTORY_MALFORMED,
 		CLIENT_PC_MMT_DIRECTORY_SENT,
 		CLIENT_PC_MMT_DICTIONARY_REQUEST_RECEIVED,
+		CLIENT_PC_MMT_DICTIONARY_REQUEST_VALIDATED,
+		CLIENT_PC_MMT_DICTIONARY_REQUEST_MALFORMED,
 		CLIENT_PC_ITEM_REQUEST_RECEIVED,
 		CLIENT_PC_ITEM_REISSUE_REQUEST_RECEIVED,
 		CLIENT_PC_ITEM_VALIDATED,
@@ -99,7 +103,7 @@ namespace usagi
 
 		bool rejectLogin (const rfa::message::ReqMsg& msg, rfa::sessionLayer::RequestToken& login_token);
 		bool acceptLogin (const rfa::message::ReqMsg& msg, rfa::sessionLayer::RequestToken& login_token);
-		bool sendDirectoryResponse (rfa::sessionLayer::RequestToken& token);
+		bool sendDirectoryResponse (rfa::sessionLayer::RequestToken& token, const char* service_name, uint32_t filter_mask);
 		bool sendDirectoryResponse();
 /* Item streams whether MMT_MARKET_PRICE or other. */
 		bool sendBlankResponse (rfa::sessionLayer::RequestToken& token, uint32_t service_id, uint8_t model_type, const char* name);

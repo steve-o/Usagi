@@ -87,13 +87,13 @@ namespace usagi
 		bool rejectClientSession (const rfa::common::Handle* handle);
 		bool acceptClientSession (const rfa::common::Handle* handle);
 
-		void getDirectoryResponse (rfa::message::RespMsg* msg, uint8_t response_type);
-		void getServiceDirectory (rfa::data::Map* map);
-		void getServiceFilterList (rfa::data::FilterList* filterList);
-		void getServiceInformation (rfa::data::ElementList* elementList);
+		void getDirectoryResponse (rfa::message::RespMsg* msg, uint8_t rwf_major_version, uint8_t rwf_minor_version, const char* service_name, uint32_t filter_mask, uint8_t response_type);
+		void getServiceDirectory (rfa::data::Map* map, uint8_t rwf_major_version, uint8_t rwf_minor_version, const char* service_name, uint32_t filter_mask);
+		void getServiceFilterList (rfa::data::FilterList* filterList, uint8_t rwf_major_version, uint8_t rwf_minor_version, uint32_t filter_mask);
+		void getServiceInformation (rfa::data::ElementList* elementList, uint8_t rwf_major_version, uint8_t rwf_minor_version);
 		void getServiceCapabilities (rfa::data::Array* capabilities);
 		void getServiceDictionaries (rfa::data::Array* dictionaries);
-		void getServiceState (rfa::data::ElementList* elementList);
+		void getServiceState (rfa::data::ElementList* elementList, uint8_t rwf_major_version, uint8_t rwf_minor_version);
 
 		uint32_t send (rfa::common::Msg& msg, rfa::sessionLayer::RequestToken& token, void* closure) throw (rfa::common::InvalidUsageException);
 		uint32_t submit (rfa::common::Msg& msg, rfa::sessionLayer::RequestToken& token, void* closure) throw (rfa::common::InvalidUsageException);

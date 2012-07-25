@@ -354,9 +354,27 @@ usagi::provider_t::processOMMInactiveClientSessionEvent (
 	cumulative_stats_[PROVIDER_PC_OMM_INACTIVE_CLIENT_SESSION_RECEIVED]++;
 }
 
+/* 7.3.5.5 Making Request for Service Directory
+ * By default, information about all available services is returned. If an
+ * application wishes to make a request for information pertaining to a 
+ * specific service only, it can use the setServiceName() method of the request
+ * AttribInfo.
+ *
+ * The setDataMask() method accepts a bit mask that determines what information
+ * is returned for each service. The bit mask values for the Service Filter are
+ * defined in Include/RDM/RDM.h. The data associated with each specified bit 
+ * mask value is returned in a separate ElementList contained in a FilterEntry.
+ * The ServiceInfo ElementList contains the name and capabilities of the 
+ * source. The ServiceState ElementList contains information related to the 
+ * availability of the service.
+ */
 void
 usagi::provider_t::getDirectoryResponse (
 	rfa::message::RespMsg* response,
+	uint8_t rwf_major_version,
+	uint8_t rwf_minor_version,
+	const char* service_name,
+	uint32_t filter_mask,
 	uint8_t response_type
 	)
 {
@@ -383,7 +401,7 @@ usagi::provider_t::getDirectoryResponse (
  *   SERVICE_DATA_FILTER  - Broadcast data.
  *   SERVICE_LINK_FILTER  - Load balance grouping.
  */
-	attribInfo_.setDataMask (rfa::rdm::SERVICE_INFO_FILTER | rfa::rdm::SERVICE_STATE_FILTER);
+	attribInfo_.setDataMask (filter_mask & (rfa::rdm::SERVICE_INFO_FILTER | rfa::rdm::SERVICE_STATE_FILTER));
 /* Name:        Not used */
 /* NameType:    Not used */
 /* ServiceName: Not used */
@@ -399,7 +417,7 @@ usagi::provider_t::getDirectoryResponse (
  */
 // not std::map :(  derived from rfa::common::Data
 	map_.clear();
-	getServiceDirectory (&map_);
+	getServiceDirectory (&map_, rwf_major_version, rwf_minor_version, service_name, filter_mask);
 	response->setPayload (map_);
 
 	status_.clear();
@@ -414,7 +432,11 @@ usagi::provider_t::getDirectoryResponse (
 
 void
 usagi::provider_t::getServiceDirectory (
-	rfa::data::Map* map
+	rfa::data::Map* map,
+	uint8_t rwf_major_version,
+	uint8_t rwf_minor_version,
+	const char* service_name,
+	uint32_t filter_mask
 	)
 {
 	rfa::data::MapWriteIterator it;
@@ -423,53 +445,62 @@ usagi::provider_t::getServiceDirectory (
 	rfa::data::FilterList filterList;
 	const RFA_String serviceName (config_.service_name.c_str(), 0, false);
 
-	map->setAssociatedMetaInfo (min_rwf_major_version_, min_rwf_minor_version_);
-	it.start (*map);
-
+	map->setAssociatedMetaInfo (rwf_major_version, rwf_minor_version);
 /* No idea ... */
 	map->setKeyDataType (rfa::data::DataBuffer::StringAsciiEnum);
-/* One service. */
-	map->setTotalCountHint (1);
+	it.start (*map);
 
+	if (nullptr == service_name || 0 == serviceName.compareCase (service_name))
+	{
+/* One service. */
+		map->setTotalCountHint (1);
 /* Service name -> service filter list */
-	mapEntry.setAction (rfa::data::MapEntry::Add);
-	dataBuffer.setFromString (serviceName, rfa::data::DataBuffer::StringAsciiEnum);
-	mapEntry.setKeyData (dataBuffer);
-	getServiceFilterList (&filterList);
-	mapEntry.setData (static_cast<rfa::common::Data&>(filterList));
-	it.bind (mapEntry);
+		mapEntry.setAction (rfa::data::MapEntry::Add);
+		dataBuffer.setFromString (serviceName, rfa::data::DataBuffer::StringAsciiEnum);
+		mapEntry.setKeyData (dataBuffer);
+		getServiceFilterList (&filterList, rwf_major_version, rwf_minor_version, filter_mask);
+		mapEntry.setData (static_cast<rfa::common::Data&>(filterList));
+		it.bind (mapEntry);
+	}
 
 	it.complete();
 }
 
 void
 usagi::provider_t::getServiceFilterList (
-	rfa::data::FilterList* filterList
+	rfa::data::FilterList* filterList,
+	uint8_t rwf_major_version,
+	uint8_t rwf_minor_version,
+	uint32_t filter_mask
 	)
 {
 	rfa::data::FilterListWriteIterator it;
 	rfa::data::FilterEntry filterEntry;
 	rfa::data::ElementList elementList;
 
-	filterList->setAssociatedMetaInfo (min_rwf_major_version_, min_rwf_minor_version_);
+	filterList->setAssociatedMetaInfo (rwf_major_version, rwf_minor_version);
 	it.start (*filterList);  
 
-/* SERVICE_INFO_ID and SERVICE_STATE_ID */
-	filterList->setTotalCountHint (2);
+	const bool use_info_filter  = (0 != (filter_mask & rfa::rdm::SERVICE_INFO_FILTER));
+	const bool use_state_filter = (0 != (filter_mask & rfa::rdm::SERVICE_STATE_FILTER));
+	const unsigned filter_count = (use_info_filter ? 1 : 0) + (use_state_filter ? 1 : 0);
+	filterList->setTotalCountHint (filter_count);
 
-/* SERVICE_INFO_ID */
-	filterEntry.setFilterId (rfa::rdm::SERVICE_INFO_ID);
-	filterEntry.setAction (rfa::data::FilterEntry::Set);
-	getServiceInformation (&elementList);
-	filterEntry.setData (static_cast<const rfa::common::Data&>(elementList));
-	it.bind (filterEntry);
+	if (use_info_filter) {
+		filterEntry.setFilterId (rfa::rdm::SERVICE_INFO_ID);
+		filterEntry.setAction (rfa::data::FilterEntry::Set);
+		getServiceInformation (&elementList, rwf_major_version, rwf_minor_version);
+		filterEntry.setData (static_cast<const rfa::common::Data&>(elementList));
+		it.bind (filterEntry);
+	}
 
-/* SERVICE_STATE_ID */
-	filterEntry.setFilterId (rfa::rdm::SERVICE_STATE_ID);
-	filterEntry.setAction (rfa::data::FilterEntry::Set);
-	getServiceState (&elementList);
-	filterEntry.setData (static_cast<const rfa::common::Data&>(elementList));
-	it.bind (filterEntry);
+	if (use_state_filter) {
+		filterEntry.setFilterId (rfa::rdm::SERVICE_STATE_ID);
+		filterEntry.setAction (rfa::data::FilterEntry::Set);
+		getServiceState (&elementList, rwf_major_version, rwf_minor_version);
+		filterEntry.setData (static_cast<const rfa::common::Data&>(elementList));
+		it.bind (filterEntry);
+	}
 
 	it.complete();
 }
@@ -479,7 +510,9 @@ usagi::provider_t::getServiceFilterList (
  */
 void
 usagi::provider_t::getServiceInformation (
-	rfa::data::ElementList* elementList
+	rfa::data::ElementList* elementList,
+	uint8_t rwf_major_version,
+	uint8_t rwf_minor_version
 	)
 {
 	rfa::data::ElementListWriteIterator it;
@@ -488,7 +521,7 @@ usagi::provider_t::getServiceInformation (
 	rfa::data::Array array_;
 	const RFA_String serviceName (config_.service_name.c_str(), 0, false);
 
-	elementList->setAssociatedMetaInfo (min_rwf_major_version_, min_rwf_minor_version_);
+	elementList->setAssociatedMetaInfo (rwf_major_version, rwf_minor_version);
 	it.start (*elementList);
 
 /* Name<AsciiString>
@@ -576,14 +609,16 @@ usagi::provider_t::getServiceDictionaries (
  */
 void
 usagi::provider_t::getServiceState (
-	rfa::data::ElementList* elementList
+	rfa::data::ElementList* elementList,
+	uint8_t rwf_major_version,
+	uint8_t rwf_minor_version
 	)
 {
 	rfa::data::ElementListWriteIterator it;
 	rfa::data::ElementEntry element;
 	rfa::data::DataBuffer dataBuffer;
 
-	elementList->setAssociatedMetaInfo (min_rwf_major_version_, min_rwf_minor_version_);
+	elementList->setAssociatedMetaInfo (rwf_major_version, rwf_minor_version);
 	it.start (*elementList);
 
 /* ServiceState<UInt>
