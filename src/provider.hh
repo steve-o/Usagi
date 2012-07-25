@@ -6,6 +6,7 @@
 #pragma once
 
 #include <cstdint>
+#include <forward_list>
 #include <unordered_map>
 
 /* Boost Posix Time */
@@ -39,21 +40,20 @@ namespace usagi
 		PROVIDER_PC_MAX
 	};
 
+	class client_t;
+
 	class item_stream_t : boost::noncopyable
 	{
 	public:
-		item_stream_t () :
-			token (nullptr)
+		item_stream_t ()
 		{
 		}
 
 /* Fixed name for this stream. */
 		rfa::common::RFA_String rfa_name;
-/* Session token which is valid from login success to login close. */
-		rfa::sessionLayer::ItemToken* token;
+/* Request tokens for clients, can be more than one per client. */
+		std::unordered_map<rfa::sessionLayer::RequestToken*, client_t*> clients;
 	};
-
-	class client_t;
 
 	class provider_t :
 		public rfa::common::Client,
@@ -95,8 +95,7 @@ namespace usagi
 		void getServiceDictionaries (rfa::data::Array* dictionaries);
 		void getServiceState (rfa::data::ElementList* elementList);
 
-		uint32_t send (rfa::common::Msg& msg, rfa::sessionLayer::ItemToken& token, void* closure) throw (rfa::common::InvalidUsageException);
-		uint32_t submit (rfa::common::Msg& msg, rfa::sessionLayer::ItemToken& token, void* closure) throw (rfa::common::InvalidUsageException);
+		uint32_t send (rfa::common::Msg& msg, rfa::sessionLayer::RequestToken& token, void* closure) throw (rfa::common::InvalidUsageException);
 		uint32_t submit (rfa::common::Msg& msg, rfa::sessionLayer::RequestToken& token, void* closure) throw (rfa::common::InvalidUsageException);
 
 		const config_t& config_;
@@ -121,7 +120,7 @@ namespace usagi
 		rfa::common::Handle* error_item_handle_;
 
 /* RFA Client Sessions */
-		std::vector<std::unique_ptr<client_t>> clients_;
+		std::vector<std::shared_ptr<client_t>> clients_;
 
 		friend client_t;
 

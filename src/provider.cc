@@ -50,8 +50,11 @@ usagi::provider_t::provider_t (
 usagi::provider_t::~provider_t()
 {
 	VLOG(3) << "Unregistering RFA session clients.";
-	std::for_each (clients_.begin(), clients_.end(), [this](std::unique_ptr<client_t>& it) {
-		omm_provider_->unregisterClient (const_cast<rfa::common::Handle*> (it->getHandle()));
+	std::for_each (clients_.begin(), clients_.end(),
+		[&](std::shared_ptr<client_t>& client)
+	{
+		CHECK ((bool)client);
+		omm_provider_->unregisterClient (const_cast<rfa::common::Handle*> (client->getHandle()));
 	});
 	if (nullptr != error_item_handle_)
 		omm_provider_->unregisterClient (error_item_handle_), error_item_handle_ = nullptr;
@@ -133,6 +136,7 @@ usagi::provider_t::createItemStream (
 {
 	VLOG(4) << "Creating item stream for RIC \"" << name << "\".";
 	item_stream->rfa_name.set (name, 0, true);
+/* no tokens until subscription appears. */
 	const std::string key (name);
 	auto status = directory_.emplace (std::make_pair (key, item_stream));
 	assert (true == status.second);
@@ -151,10 +155,13 @@ usagi::provider_t::send (
 	rfa::common::Msg& msg
 )
 {
-	if (is_muted_)
-		return false;
-	assert (nullptr != item_stream.token);
-	send (msg, *item_stream.token, nullptr);
+	unsigned i = 0;
+	std::for_each (item_stream.clients.begin(), item_stream.clients.end(),
+		[&](const std::pair<rfa::sessionLayer::RequestToken*, client_t*>& client)
+	{
+		send (msg, *(client.first), nullptr);
+		++i;
+	});
 	cumulative_stats_[PROVIDER_PC_MSGS_SENT]++;
 	last_activity_ = boost::posix_time::second_clock::universal_time();
 	return true;
@@ -163,7 +170,7 @@ usagi::provider_t::send (
 uint32_t
 usagi::provider_t::send (
 	rfa::common::Msg& msg,
-	rfa::sessionLayer::ItemToken& token,
+	rfa::sessionLayer::RequestToken& token,
 	void* closure
 	)
 {
@@ -171,30 +178,6 @@ usagi::provider_t::send (
 		return false;
 
 	return submit (msg, token, closure);
-}
-
-/* 7.5.9.6 Create the OMMItemCmd object and populate it with the response
- * message.  The Cmd essentially acts as a wrapper around the response message.
- * The Cmd may be created on the heap or the stack.
- */
-uint32_t
-usagi::provider_t::submit (
-	rfa::common::Msg& msg,
-	rfa::sessionLayer::ItemToken& token,
-	void* closure
-	)
-{
-	rfa::sessionLayer::OMMItemCmd itemCmd;
-	itemCmd.setMsg (msg);
-/* 7.5.9.7 Set the unique item identifier. */
-	itemCmd.setItemToken (&token);
-/* 7.5.9.8 Write the response message directly out to the network through the
- * connection.
- */
-	assert ((bool)omm_provider_);
-	const uint32_t submit_status = omm_provider_->submit (&itemCmd, closure);
-	cumulative_stats_[PROVIDER_PC_RFA_MSGS_SENT]++;
-	return submit_status;
 }
 
 /* 7.4.8 Sending response messages using an OMM provider.

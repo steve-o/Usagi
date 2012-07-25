@@ -6,6 +6,7 @@
 #pragma once
 
 #include <cstdint>
+#include <forward_list>
 #include <unordered_map>
 
 /* Boost Posix Time */
@@ -44,15 +45,19 @@ namespace usagi
 		CLIENT_PC_MMT_DIRECTORY_MALFORMED,
 		CLIENT_PC_MMT_DIRECTORY_SENT,
 		CLIENT_PC_MMT_DICTIONARY_REQUEST_RECEIVED,
-		CLIENT_PC_MMT_MARKET_PRICE_REQUEST_RECEIVED,
-		CLIENT_PC_MMT_MARKET_PRICE_VALIDATED,
-		CLIENT_PC_MMT_MARKET_PRICE_MALFORMED,
-		CLIENT_PC_MMT_MARKET_PRICE_SENT,
+		CLIENT_PC_ITEM_REQUEST_RECEIVED,
+		CLIENT_PC_ITEM_REISSUE_REQUEST_RECEIVED,
+		CLIENT_PC_ITEM_VALIDATED,
+		CLIENT_PC_ITEM_MALFORMED,
+		CLIENT_PC_ITEM_NOT_FOUND,
+		CLIENT_PC_ITEM_SENT,
+		CLIENT_PC_ITEM_CLOSED,
 /* marker */
 		CLIENT_PC_MAX
 	};
 
 	class provider_t;
+	class item_stream_t;
 
 	class client_t :
 		public rfa::common::Client,
@@ -83,7 +88,7 @@ namespace usagi
 		void processLoginRequest (const rfa::message::ReqMsg& msg, rfa::sessionLayer::RequestToken& token);
 		void processDirectoryRequest (const rfa::message::ReqMsg& msg, rfa::sessionLayer::RequestToken& token);
 		void processDictionaryRequest (const rfa::message::ReqMsg& msg, rfa::sessionLayer::RequestToken& token);
-		void processMarketPriceRequest (const rfa::message::ReqMsg& msg, rfa::sessionLayer::RequestToken& token);
+		void processItemRequest (const rfa::message::ReqMsg& msg, rfa::sessionLayer::RequestToken& token);
 		void processOMMItemEvent (const rfa::sessionLayer::OMMItemEvent& event);
                 void processRespMsg (const rfa::message::RespMsg& msg);
                 void processLoginResponse (const rfa::message::RespMsg& msg);
@@ -96,8 +101,9 @@ namespace usagi
 		bool acceptLogin (const rfa::message::ReqMsg& msg, rfa::sessionLayer::RequestToken& login_token);
 		bool sendDirectoryResponse (rfa::sessionLayer::RequestToken& token);
 		bool sendDirectoryResponse();
-		bool sendBlankResponse (rfa::sessionLayer::RequestToken& token, const char* service_name, const char* name);
-		bool sendLoginRequest() throw (rfa::common::InvalidUsageException);
+/* Item streams whether MMT_MARKET_PRICE or other. */
+		bool sendBlankResponse (rfa::sessionLayer::RequestToken& token, uint32_t service_id, uint8_t model_type, const char* name);
+		bool sendClose (rfa::sessionLayer::RequestToken& token, uint32_t service_id, uint8_t model_type, const char* name, bool use_attribinfo_in_updates, uint8_t status_code);
 
 		uint32_t submit (rfa::common::Msg& msg, rfa::sessionLayer::RequestToken& token, void* closure) throw (rfa::common::InvalidUsageException);
 
@@ -106,8 +112,14 @@ namespace usagi
 /* unique id per connection. */
 		std::string prefix_;
 
-/* RFA Client Session event consumer */
+/* RFA Client Session event consumer. */
 		const rfa::common::Handle* handle_;
+
+/* RFA login token for closing out the Client Session. */
+		rfa::sessionLayer::RequestToken* login_token_;
+
+/* Watchlist of all items. */
+		std::unordered_map<rfa::sessionLayer::RequestToken*, std::weak_ptr<item_stream_t>> items_;
 
 /* Reuters Wire Format versions. */
 		uint8_t rwf_major_version_;

@@ -65,7 +65,6 @@ usagi::usagi_t::run ()
 		if (!(bool)provider_ || !provider_->init())
 			goto cleanup;
 
-#if 0
 /* Create state for published RIC. */
 		static const std::string msft ("MSFT.O");
 		auto stream = std::make_shared<broadcast_stream_t> ();
@@ -74,7 +73,6 @@ usagi::usagi_t::run ()
 		if (!provider_->createItemStream (msft.c_str(), stream))
 			goto cleanup;
 		msft_stream_ = std::move (stream);
-#endif
 
 	} catch (rfa::common::InvalidUsageException& e) {
 		LOG(ERROR) << "InvalidUsageException: { "
@@ -92,7 +90,6 @@ usagi::usagi_t::run ()
 		goto cleanup;
 	}
 
-#if 0
 /* Timer for demo periodic publishing of items.
  */
 	timer_.reset (new time_pump_t<boost::chrono::system_clock> (boost::chrono::system_clock::now(), boost::chrono::seconds (1), this));
@@ -102,7 +99,6 @@ usagi::usagi_t::run ()
 	if (!(bool)timer_thread_)
 		goto cleanup;
 	LOG(INFO) << "Added periodic timer, interval " << boost::chrono::seconds (1).count() << " seconds";
-#endif
 
 	LOG(INFO) << "Init complete, entering main loop.";
 	mainLoop ();
@@ -231,35 +227,11 @@ usagi::usagi_t::sendRefresh()
 /* 7.5.9.2 Set the message model type of the response. */
 	response.setMsgModelType (rfa::rdm::MMT_MARKET_PRICE);
 /* 7.5.9.3 Set response type. */
-	response.setRespType (rfa::message::RespMsg::RefreshEnum);
-	response.setIndicationMask (rfa::message::RespMsg::RefreshCompleteFlag);
+	response.setRespType (rfa::message::RespMsg::UpdateEnum);
 /* 7.5.9.4 Set the response type enumation. */
 	response.setRespTypeNum (rfa::rdm::REFRESH_UNSOLICITED);
 
-/* 7.5.9.5 Create or re-use a request attribute object (4.2.4) */
-	rfa::message::AttribInfo attribInfo (false);	/* reference */
-	attribInfo.setNameType (rfa::rdm::INSTRUMENT_NAME_RIC);
-	RFA_String service_name (config_.service_name.c_str(), 0, false);	/* reference */
-	attribInfo.setName (msft_stream_->rfa_name);
-	LOG(INFO) << "Publishing to stream " << msft_stream_->rfa_name;
-	attribInfo.setServiceName (service_name);
-	response.setAttribInfo (attribInfo);
-
 /* 4.3.1 RespMsg.Payload */
-/* 6.2.8 Quality of Service. */
-	rfa::common::QualityOfService QoS;
-/* Timeliness: age of data, either real-time, unspecified delayed timeliness,
- * unspecified timeliness, or any positive number representing the actual
- * delay in seconds.
- */
-	QoS.setTimeliness (rfa::common::QualityOfService::realTime);
-/* Rate: minimum period of change in data, either tick-by-tick, just-in-time
- * filtered rate, unspecified rate, or any positive number representing the
- * actual rate in milliseconds.
- */
-	QoS.setRate (rfa::common::QualityOfService::tickByTick);
-	response.setQualityOfService (QoS);
-
 // not std::map :(  derived from rfa::common::Data
 	fields_.setAssociatedMetaInfo (provider_->getRwfMajorVersion(), provider_->getRwfMinorVersion());
 	fields_.setInfo (kDictionaryId, kFieldListId);
@@ -285,26 +257,22 @@ usagi::usagi_t::sendRefresh()
 /* Set a reference to field list, not a copy */
 	response.setPayload (fields_);
 
-	rfa::common::RespStatus status;
-/* Item interaction state: Open, Closed, ClosedRecover, Redirected, NonStreaming, or Unspecified. */
-	status.setStreamState (rfa::common::RespStatus::OpenEnum);
-/* Data quality state: Ok, Suspect, or Unspecified. */
-	status.setDataState (rfa::common::RespStatus::OkEnum);
-/* Error code, e.g. NotFound, InvalidArgument, ... */
-	status.setStatusCode (rfa::common::RespStatus::NoneEnum);
-	response.setRespStatus (status);
-
 #ifdef DEBUG
 /* 4.2.8 Message Validation.  RFA provides an interface to verify that
  * constructed messages of these types conform to the Reuters Domain
  * Models as specified in RFA API 7 RDM Usage Guide.
  */
-	RFA_String warningText;
-	const uint8_t validation_status = response.validateMsg (&warningText);
-	if (rfa::message::MsgValidationWarning == validation_status) {
-		LOG(ERROR) << "respMsg::validateMsg: { \"warningText\": \"" << warningText << "\" }";
-	} else {
-		assert (rfa::message::MsgValidationOk == validation_status);
+	uint8_t validation_status = rfa::message::MsgValidationError;
+	try {
+		RFA_String warningText;
+		validation_status = response.validateMsg (&warningText);
+		if (rfa::message::MsgValidationWarning == validation_status)
+			LOG(ERROR) << prefix_ << "MMT_MARKET_PRICE::validateMsg: { \"warningText\": \"" << warningText << "\" }";
+	} catch (rfa::common::InvalidUsageException& e) {
+		LOG(ERROR) << "MMT_MARKET_PRICE::InvalidUsageException: { " <<
+				   response <<
+				", \"StatusText\": \"" << e.getStatus().getStatusText() << "\""
+				" }";
 	}
 #endif
 

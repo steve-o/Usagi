@@ -35,6 +35,7 @@ usagi::client_t::client_t (
 	last_activity_ (creation_time_),
 	provider_ (provider),
 	handle_ (handle),
+	login_token_ (nullptr),
 	rwf_major_version_ (0),
 	rwf_minor_version_ (0),
 	is_muted_ (true),
@@ -138,7 +139,11 @@ usagi::client_t::processReqMsg (
 		processDictionaryRequest (request_msg, request_token);
 		break;
 	case rfa::rdm::MMT_MARKET_PRICE:
-		processMarketPriceRequest (request_msg, request_token);
+	case rfa::rdm::MMT_MARKET_BY_ORDER:
+	case rfa::rdm::MMT_MARKET_BY_PRICE:
+	case rfa::rdm::MMT_MARKET_MAKER:
+	case rfa::rdm::MMT_SYMBOL_LIST:
+		processItemRequest (request_msg, request_token);
 		break;
 	default:
 		cumulative_stats_[CLIENT_PC_REQUEST_MSGS_DISCARDED]++;
@@ -185,10 +190,14 @@ usagi::client_t::processLoginRequest (
 		cumulative_stats_[CLIENT_PC_MMT_LOGIN_MALFORMED]++;
 		LOG(WARNING) << prefix_ <<
 			"MMT_LOGIN::InvalidUsageException: { " <<
-			   login_msg <<
-			", \"StatusText\": \"" << e.getStatus().getStatusText() << "\""
+			  "\"StatusText\": \"" << e.getStatus().getStatusText() << "\""
+			", " << login_msg <<
+			", \"RequestToken\": " << (intptr_t)&login_token <<
 			" }";
 	}
+
+	static const uint8_t streaming_request = rfa::message::ReqMsg::InitialImageFlag | rfa::message::ReqMsg::InterestAfterRefreshFlag;
+	static const uint8_t pause_request     = rfa::message::ReqMsg::PauseFlag;
 
 	try {
 		if (rfa::message::MsgValidationError == validation_status) 
@@ -200,10 +209,10 @@ usagi::client_t::processLoginRequest (
 /* RDM 3.2.4: All message types except GenericMsg should include an AttribInfo.
  * RFA example code verifies existence of AttribInfo with an assertion.
  */
-		CHECK (login_msg.getHintMask() & rfa::message::ReqMsg::AttribInfoFlag);
-
-		const uint8_t streaming_request = rfa::message::ReqMsg::InitialImageFlag | rfa::message::ReqMsg::InterestAfterRefreshFlag;
-		const uint8_t pause_request     = rfa::message::ReqMsg::PauseFlag;
+		CHECK(!login_msg.isBlank());
+		CHECK(0 != (login_msg.getHintMask() & rfa::message::ReqMsg::AttribInfoFlag));
+		CHECK(rfa::message::AttribInfo::NameFlag     == (login_msg.getAttribInfo().getHintMask() & rfa::message::AttribInfo::NameFlag));
+		CHECK(rfa::message::AttribInfo::NameTypeFlag == (login_msg.getAttribInfo().getHintMask() & rfa::message::AttribInfo::NameTypeFlag));
 		const bool is_streaming_request = ((login_msg.getInteractionType() == streaming_request)
 						|| (login_msg.getInteractionType() == (streaming_request | pause_request)));
 		const bool is_pause_request     = (login_msg.getInteractionType() == pause_request);
@@ -216,12 +225,17 @@ usagi::client_t::processLoginRequest (
 		else
 		{
 			acceptLogin (login_msg, login_token);
+
+/* save token for closing the session. */
+			login_token_ = &login_token;
 		}
 /* ignore any error */
 	} catch (rfa::common::InvalidUsageException& e) {
 		LOG(ERROR) << prefix_ <<
 			"MMT_LOGIN::InvalidUsageException: { "
-			"\"StatusText\": \"" << e.getStatus().getStatusText() << "\""
+			   "\"StatusText\": \"" << e.getStatus().getStatusText() << "\""
+			", " << login_msg <<
+			", \"RequestToken\": " << (intptr_t)&login_token <<
 			" }";
 	}
 }
@@ -287,8 +301,8 @@ usagi::client_t::rejectLogin (
 		cumulative_stats_[CLIENT_PC_MMT_LOGIN_RESPONSE_MALFORMED]++;
 		LOG(ERROR) << prefix_ <<
 			"MMT_LOGIN::InvalidUsageException: { " <<
-			   response <<
-			", \"StatusText\": \"" << e.getStatus().getStatusText() << "\""
+			   "\"StatusText\": \"" << e.getStatus().getStatusText() << "\""
+			", " << response <<
 			" }";
 	}
 
@@ -392,8 +406,8 @@ usagi::client_t::acceptLogin (
 		cumulative_stats_[CLIENT_PC_MMT_LOGIN_RESPONSE_MALFORMED]++;
 		LOG(ERROR) << prefix_ <<
 			"MMT_LOGIN::InvalidUsageException: { " <<
-			   response <<
-			", \"StatusText\": \"" << e.getStatus().getStatusText() << "\""
+			   "\"StatusText\": \"" << e.getStatus().getStatusText() << "\""
+			", " << response <<
 			" }";
 	}
 
@@ -430,29 +444,120 @@ usagi::client_t::processDictionaryRequest (
 }
 
 void
-usagi::client_t::processMarketPriceRequest (
+usagi::client_t::processItemRequest (
 	const rfa::message::ReqMsg&	request_msg,
 	rfa::sessionLayer::RequestToken& request_token
 	)
 {
-	cumulative_stats_[CLIENT_PC_MMT_MARKET_PRICE_REQUEST_RECEIVED]++;
-	LOG(INFO) << prefix_ << "MarketPriceRequest:" << request_msg;
+	cumulative_stats_[CLIENT_PC_ITEM_REQUEST_RECEIVED]++;
+	LOG(INFO) << prefix_ << "ItemRequest:" << request_msg;
 
-	// handle = request_token.getHandle();
+/* 10.3.6 Handling Item Requests
+ * - Ensure that the requesting session is logged in.
+ * - Determine whether the requested QoS can be satisified.
+ * - Ensure that the same stream is not already provisioned.
+ */
+	static const uint8_t streaming_request = rfa::message::ReqMsg::InitialImageFlag | rfa::message::ReqMsg::InterestAfterRefreshFlag;
+	static const uint8_t snapshot_request  = rfa::message::ReqMsg::InitialImageFlag;
+	static const uint8_t pause_request     = rfa::message::ReqMsg::PauseFlag;
+	static const uint8_t resume_request    = rfa::message::ReqMsg::InterestAfterRefreshFlag;
+	static const uint8_t close_request     = 0;
 
 /* A response is not required to be immediately generated, for example
  * forwarding the clients request to an upstream resource and waiting for
  * a reply.
  */
 	try {
-		auto& attribInfo = request_msg.getAttribInfo();
-		sendBlankResponse (request_token,
-				   attribInfo.getServiceName().c_str(),
-				   attribInfo.getName().c_str());
+		const uint32_t service_id    = request_msg.getAttribInfo().getServiceID();
+		const uint8_t  model_type    = request_msg.getMsgModelType();
+		const char*    item_name     = request_msg.getAttribInfo().getName().c_str();
+		const bool use_attribinfo_in_updates = (0 != (request_msg.getIndicationMask() & rfa::message::ReqMsg::AttribInfoInUpdatesFlag));
+
+/* Only accept MMT_MARKET_PRICE. */
+		if (rfa::rdm::MMT_MARKET_PRICE != model_type)
+		{
+			LOG(INFO) << prefix_ << "Closing request for unsupported message model type.";
+			sendClose (request_token, service_id, model_type, item_name, use_attribinfo_in_updates, rfa::common::RespStatus::NotAuthorizedEnum);
+			return;
+		}
+
+		const bool is_streaming_request = (request_msg.getInteractionType() == streaming_request);
+/* 7.4.3.2 Request Tokens
+ * Providers should not attempt to submit data after the provider has received a close request for an item. */
+		const bool is_close             = (request_msg.getInteractionType() == close_request);
+
+/* check for request token in client watchlist. */
+		auto it = items_.find (&request_token);
+		if (it != items_.end())
+		{
+/* existing request. */
+			if (is_close)
+			{
+/* remove from item client list. */
+				LOG(INFO) << prefix_ << "Closing open request.";
+				auto sp = it->second.lock();
+				if ((bool)sp) {
+					auto stream = sp.get();
+					auto it = stream->clients.find (&request_token);
+					DCHECK (it != stream->clients.end());
+					stream->clients.erase (it);
+				}
+/* remove from client item list. */
+				items_.erase (it);
+			}
+			else if (!is_streaming_request)
+			{
+/* invalid. */
+				LOG(INFO) << prefix_ << "Closing open request on invalid snapshot reissue request.";
+				sendClose (request_token, service_id, model_type, item_name, use_attribinfo_in_updates, rfa::common::RespStatus::NotAuthorizedEnum);
+			}
+			else
+			{
+/* RDM 2.5.2 Reissue Requests
+ * A consumer application can request a new refresh and change certain
+ * parameters on an already requested stream.
+ */
+				LOG(INFO) << prefix_ << "Sending refresh on reissue request.";
+				sendBlankResponse (request_token, service_id, model_type, item_name);
+			}
+		}
+		else
+		{
+/* new request. */
+			if (is_close)
+			{
+/* invalid. */
+				LOG(INFO) << prefix_ << "Discarding close request on closed item.";
+			}
+			else if (!is_streaming_request)
+			{
+/* closest equivalent to not-supported is NotAuthorizedEnum. */
+				LOG(INFO) << prefix_ << "Closing unsupported snapshot request.";
+				sendClose (request_token, service_id, model_type, item_name, use_attribinfo_in_updates, rfa::common::RespStatus::NotAuthorizedEnum);
+			}
+			else
+			{
+/* check for item in inventory */
+				auto it = provider_.directory_.find (item_name);
+				if (it == provider_.directory_.end()) {
+					LOG(INFO) << prefix_ << "Closing request for item not found in directory.";
+					sendClose (request_token, service_id, model_type, item_name, use_attribinfo_in_updates, rfa::common::RespStatus::NotFoundEnum);
+					return;
+				}
+				LOG(INFO) << prefix_ << "Sending refresh on request.";
+				auto stream = it->second.lock();
+				DCHECK ((bool)stream);
+				items_.emplace (std::make_pair (&request_token, stream));
+				stream->clients.emplace (std::make_pair (&request_token, this));
+				sendBlankResponse (request_token, service_id, model_type, item_name);
+			}
+		}
 /* ignore any error */
 	} catch (rfa::common::InvalidUsageException& e) {
-		LOG(ERROR) << prefix_ << "MMT_MARKET_PRICE::InvalidUsageException: { "
-				"\"StatusText\": \"" << e.getStatus().getStatusText() << "\""
+		LOG(ERROR) << prefix_ << "InvalidUsageException: { "
+				   "\"StatusText\": \"" << e.getStatus().getStatusText() << "\"" <<
+				", " << request_msg <<
+				", \"RequestToken\": " << (intptr_t)&request_token <<
 				" }";
 	}
 }
@@ -488,8 +593,8 @@ usagi::client_t::sendDirectoryResponse (
 		cumulative_stats_[CLIENT_PC_MMT_DIRECTORY_MALFORMED]++;
 		LOG(ERROR) << prefix_ <<
 			"MMT_DIRECTORY::InvalidUsageException: { " <<
-			   response <<
-			", \"StatusText\": \"" << e.getStatus().getStatusText() << "\""
+			   "\"StatusText\": \"" << e.getStatus().getStatusText() << "\""
+			", " << response <<
 			" }";
 	}
 
@@ -499,20 +604,27 @@ usagi::client_t::sendDirectoryResponse (
 	return true;
 }
 
+/* Refresh initial image.
+ */
 bool
 usagi::client_t::sendBlankResponse (
 	rfa::sessionLayer::RequestToken& request_token,
-	const char* service_name_c,
+	uint32_t service_id,
+	uint8_t model_type,
 	const char* name_c
 	)
 {
-	VLOG(2) << "Sending blank item response.";
-
+	VLOG(2) << prefix_ << "Sending blank response { "
+		  "\"RequestToken\": \"" << (intptr_t)&request_token << "\""
+		", \"ServiceID\": " << service_id <<
+		", \"MsgModelType\": " << (int)model_type <<
+		", \"Name\": \"" << name_c << "\""
+		" }";
 /* 7.5.9.1 Create a response message (4.2.2) */
 	rfa::message::RespMsg response (false);	/* reference */
 
 /* 7.5.9.2 Set the message model type of the response. */
-	response.setMsgModelType (rfa::rdm::MMT_MARKET_PRICE);
+	response.setMsgModelType (model_type);
 /* 7.5.9.3 Set response type. */
 	response.setRespType (rfa::message::RespMsg::RefreshEnum);
 	response.setIndicationMask (rfa::message::RespMsg::RefreshCompleteFlag);
@@ -520,11 +632,9 @@ usagi::client_t::sendBlankResponse (
 /* 7.5.9.5 Create or re-use a request attribute object (4.2.4) */
 	rfa::message::AttribInfo attribInfo;
 	attribInfo.setNameType (rfa::rdm::INSTRUMENT_NAME_RIC);
-	RFA_String service_name (service_name_c, 0, false),	/* reference */
-		name (name_c, 0, false);
-	attribInfo.setServiceName (service_name);
+	RFA_String name (name_c, 0, false);	/* reference */
+	attribInfo.setServiceID (service_id);
 	attribInfo.setName (name);
-	LOG(INFO) << "Publishing to stream " << name;
 	response.setAttribInfo (attribInfo);
 
 /* 4.3.1 RespMsg.Payload */
@@ -544,6 +654,7 @@ usagi::client_t::sendBlankResponse (
 	status.setStatusCode (rfa::common::RespStatus::NoneEnum);
 	response.setRespStatus (status);
 
+#ifdef DEBUG
 /* 4.2.8 Message Validation.  RFA provides an interface to verify that
  * constructed messages of these types conform to the Reuters Domain
  * Models as specified in RFA API 7 RDM Usage Guide.
@@ -552,21 +663,104 @@ usagi::client_t::sendBlankResponse (
 	try {
 		RFA_String warningText;
 		validation_status = response.validateMsg (&warningText);
-		cumulative_stats_[CLIENT_PC_MMT_MARKET_PRICE_VALIDATED]++;
+		cumulative_stats_[CLIENT_PC_ITEM_VALIDATED]++;
 		if (rfa::message::MsgValidationWarning == validation_status)
-			LOG(ERROR) << prefix_ << "MMT_MARKET_PRICE::validateMsg: { \"warningText\": \"" << warningText << "\" }";
+			LOG(ERROR) << prefix_ << "validateMsg: { \"warningText\": \"" << warningText << "\" }";
 	} catch (rfa::common::InvalidUsageException& e) {
-		cumulative_stats_[CLIENT_PC_MMT_MARKET_PRICE_MALFORMED]++;
+		cumulative_stats_[CLIENT_PC_ITEM_MALFORMED]++;
 		LOG(ERROR) << prefix_ <<
-			"MMT_MARKET_PRICE::InvalidUsageException: { " <<
-			   response <<
-			", \"StatusText\": \"" << e.getStatus().getStatusText() << "\""
+			"nvalidUsageException: { " <<
+			   "\"StatusText\": \"" << e.getStatus().getStatusText() << "\""
+			", " << response <<
 			" }";
 	}
+#endif
 
-/* Create and throw away first token for MMT_DIRECTORY. */
 	submit (static_cast<rfa::common::Msg&> (response), request_token, nullptr);
-	cumulative_stats_[CLIENT_PC_MMT_MARKET_PRICE_SENT]++;
+	cumulative_stats_[CLIENT_PC_ITEM_SENT]++;
+	return true;
+}
+
+bool
+usagi::client_t::sendClose (
+	rfa::sessionLayer::RequestToken& request_token,
+	uint32_t service_id,
+	uint8_t model_type,
+	const char* name_c,
+	bool use_attribinfo_in_updates,
+	uint8_t status_code
+	)
+{
+	VLOG(2) << prefix_ << "Sending item close { "
+		  "\"RequestToken\": " << (intptr_t)&request_token <<
+		", \"ServiceID\": " << service_id <<
+		", \"MsgModelType\": " << (int)model_type <<
+		", \"Name\": \"" << name_c << "\""
+		", \"AttribInfoInUpdates\": " << (use_attribinfo_in_updates ? "true" : "false") <<
+		", \"StatusCode\": " << (int)status_code <<
+		" }";
+/* 7.5.9.1 Create a response message (4.2.2) */
+	rfa::message::RespMsg response (false);	/* reference */
+
+/* 7.5.9.2 Set the message model type of the response. */
+	response.setMsgModelType (model_type);
+/* 7.5.9.3 Set response type. */
+	response.setRespType (rfa::message::RespMsg::StatusEnum);
+
+/* RDM 6.2.3 AttribInfo
+ * if the ReqMsg set AttribInfoInUpdates, then the AttribInfo must be provided for all
+ * Refresh, Status, and Update RespMsgs.
+ */
+	if (use_attribinfo_in_updates) {
+/* 7.5.9.5 Create or re-use a request attribute object (4.2.4) */
+		rfa::message::AttribInfo attribInfo;
+		attribInfo.setNameType (rfa::rdm::INSTRUMENT_NAME_RIC);
+		const RFA_String name (name_c, 0, false);	/* reference */
+		attribInfo.setServiceID (service_id);
+		attribInfo.setName (name);
+		response.setAttribInfo (attribInfo);
+	}
+	
+	rfa::common::RespStatus status;
+/* Item interaction state: Open, Closed, ClosedRecover, Redirected, NonStreaming, or Unspecified. */
+	status.setStreamState (rfa::common::RespStatus::ClosedEnum);
+/* Data quality state: Ok, Suspect, or Unspecified. */
+	status.setDataState (rfa::common::RespStatus::OkEnum);
+/* Error code, e.g. NotFound, InvalidArgument, ... */
+	status.setStatusCode (rfa::common::RespStatus::NotFoundEnum);
+	response.setRespStatus (status);
+
+#ifdef DEBUG
+/* 4.2.8 Message Validation.  RFA provides an interface to verify that
+ * constructed messages of these types conform to the Reuters Domain
+ * Models as specified in RFA API 7 RDM Usage Guide.
+ */
+	uint8_t validation_status = rfa::message::MsgValidationError;
+	try {
+		RFA_String warningText;
+		validation_status = response.validateMsg (&warningText);
+		cumulative_stats_[CLIENT_PC_ITEM_VALIDATED]++;
+		if (rfa::message::MsgValidationWarning == validation_status)
+			LOG(ERROR) << prefix_ << "validateMsg: { \"warningText\": \"" << warningText << "\" }";
+	} catch (rfa::common::InvalidUsageException& e) {
+		cumulative_stats_[CLIENT_PC_ITEM_MALFORMED]++;
+		LOG(ERROR) << prefix_ <<
+			"InvalidUsageException: { " <<
+			   "\"StatusText\": \"" << e.getStatus().getStatusText() << "\""
+			", " << response <<
+			" }";
+	}
+#endif
+
+	submit (static_cast<rfa::common::Msg&> (response), request_token, nullptr);
+	switch (status_code) {
+	case rfa::common::RespStatus::NotFoundEnum:
+		cumulative_stats_[CLIENT_PC_ITEM_NOT_FOUND]++;
+		break;
+	default:
+		break;
+	}
+	cumulative_stats_[CLIENT_PC_ITEM_CLOSED]++;
 	return true;
 }
 
