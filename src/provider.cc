@@ -51,10 +51,11 @@ usagi::provider_t::~provider_t()
 {
 	VLOG(3) << "Unregistering RFA session clients.";
 	std::for_each (clients_.begin(), clients_.end(),
-		[&](std::shared_ptr<client_t>& client)
+		[&](std::pair<rfa::common::Handle*const, std::shared_ptr<client_t>>& client)
 	{
-		CHECK ((bool)client);
-		omm_provider_->unregisterClient (const_cast<rfa::common::Handle*> (client->getHandle()));
+		CHECK ((bool)client.second);
+//		omm_provider_->unregisterClient (const_cast<rfa::common::Handle*> (client.first));
+		omm_provider_->unregisterClient (client.first);
 	});
 	if (nullptr != error_item_handle_)
 		omm_provider_->unregisterClient (error_item_handle_), error_item_handle_ = nullptr;
@@ -104,21 +105,21 @@ usagi::provider_t::init()
 	VLOG(3) << "Registering connection interest.";
 	rfa::sessionLayer::OMMListenerConnectionIntSpec ommListenerConnectionIntSpec;
 /* (optional) specify specific connection names (comma delimited) to filter incoming events */
-	connection_item_handle_ = omm_provider_->registerClient (event_queue_.get(), &ommListenerConnectionIntSpec, *this, nullptr /* closure */);
+	connection_item_handle_ = omm_provider_->registerClient (event_queue_.get(), &ommListenerConnectionIntSpec, *static_cast<rfa::common::Client*> (this), nullptr /* closure */);
 	if (nullptr == connection_item_handle_)
 		return false;
 
 /* listen events. */
 	VLOG(3) << "Registering listen interest.";
 	rfa::sessionLayer::OMMClientSessionListenerIntSpec ommClientSessionListenerIntSpec;
-	listen_item_handle_ = omm_provider_->registerClient (event_queue_.get(), &ommClientSessionListenerIntSpec, *this, nullptr /* closure */);
+	listen_item_handle_ = omm_provider_->registerClient (event_queue_.get(), &ommClientSessionListenerIntSpec, *static_cast<rfa::common::Client*> (this), nullptr /* closure */);
 	if (nullptr == listen_item_handle_)
 		return false;
 
 /* receive error events (OMMCmdErrorEvent) related to calls to submit(). */
 	VLOG(3) << "Registering OMM error interest.";
 	rfa::sessionLayer::OMMErrorIntSpec ommErrorIntSpec;
-	error_item_handle_ = omm_provider_->registerClient (event_queue_.get(), &ommErrorIntSpec, *this, nullptr /* closure */);
+	error_item_handle_ = omm_provider_->registerClient (event_queue_.get(), &ommErrorIntSpec, *static_cast<rfa::common::Client*> (this), nullptr /* closure */);
 	if (nullptr == error_item_handle_)
 		return false;
 
@@ -157,9 +158,10 @@ usagi::provider_t::send (
 {
 	unsigned i = 0;
 	std::for_each (item_stream.clients.begin(), item_stream.clients.end(),
-		[&](const std::pair<rfa::sessionLayer::RequestToken*, client_t*>& client)
+		[&](const std::pair<rfa::sessionLayer::RequestToken*, std::shared_ptr<client_t>>& client)
 	{
 		send (msg, *(client.first), nullptr);
+		client.second->cumulative_stats_[CLIENT_PC_RFA_MSGS_SENT]++;
 		++i;
 	});
 	cumulative_stats_[PROVIDER_PC_MSGS_SENT]++;
@@ -220,10 +222,6 @@ usagi::provider_t::processEvent (
 		processOMMActiveClientSessionEvent(static_cast<const rfa::sessionLayer::OMMActiveClientSessionEvent&>(event_));
 		break;
 
-	case rfa::sessionLayer::OMMInactiveClientSessionEventEnum:
-		processOMMInactiveClientSessionEvent(static_cast<const rfa::sessionLayer::OMMInactiveClientSessionEvent&>(event_));
-		break;
-
         case rfa::sessionLayer::OMMCmdErrorEventEnum:
                 processOMMCmdErrorEvent (static_cast<const rfa::sessionLayer::OMMCmdErrorEvent&>(event_));
                 break;
@@ -257,15 +255,10 @@ usagi::provider_t::processOMMActiveClientSessionEvent (
 {
 	cumulative_stats_[PROVIDER_PC_OMM_ACTIVE_CLIENT_SESSION_RECEIVED]++;
 	try {
-		const auto handle = session_event.getClientSessionHandle();
 		if (!is_accepting_connections_)
-		{
-			rejectClientSession (handle);
-		}
+			rejectClientSession (session_event.getClientSessionHandle());
 		else
-		{
-			acceptClientSession (handle);
-		}
+			acceptClientSession (session_event.getClientSessionHandle());
 /* ignore any error */
 	} catch (rfa::common::InvalidUsageException& e) {
 		LOG(ERROR) << "OMMActiveClientSession::InvalidUsageException: { "
@@ -301,16 +294,21 @@ usagi::provider_t::acceptClientSession (
 {
 	VLOG(2) << "Accepting new client session request.";
 
-	std::unique_ptr<client_t> client (new client_t (*this, handle));
+	auto client = std::make_shared<client_t> (*this);
 	if (!(bool)client)
 		return false;
 
 /* 7.4.7.2.1 Handling login requests. */
 	rfa::sessionLayer::OMMClientSessionIntSpec ommClientSessionIntSpec;
 	ommClientSessionIntSpec.setClientSessionHandle (handle);
-	rfa::common::Handle* registered_handle = omm_provider_->registerClient (event_queue_.get(), &ommClientSessionIntSpec, *static_cast<rfa::common::Client*> (client.get()), nullptr /* closure */);
-	if (handle != registered_handle || !client->getAssociatedMetaInfo())
+	auto registered_handle = omm_provider_->registerClient (event_queue_.get(), &ommClientSessionIntSpec, *static_cast<rfa::common::Client*> (client.get()), nullptr /* closure */);
+	if (nullptr == registered_handle)
 		return false;
+	client->setHandle (registered_handle);
+	if (!client->getAssociatedMetaInfo()) {
+		omm_provider_->unregisterClient (registered_handle);
+		return false;
+	}
 
 /* Determine lowest common Reuters Wire Format (RWF) version */
 	if (0 == min_rwf_major_version_ &&
@@ -334,24 +332,24 @@ usagi::provider_t::acceptClientSession (
 		min_rwf_minor_version_ = client->getRwfMinorVersion();
 	}
 
-	clients_.push_back (std::move (client));
+	clients_.emplace (std::make_pair (registered_handle, client));
 	cumulative_stats_[PROVIDER_PC_CLIENT_SESSION_ACCEPTED]++;
 	return true;
 }
 
-/* 7.4.7.1.2 Handling Consumer Client Session Events: Client session connection
- *           has been lost.
- *
- * When the provider receives this event it should stop sending any data to that
- * client session. Then it should remove references to the client session handle
- * and its associated request tokens.
- */
-void
-usagi::provider_t::processOMMInactiveClientSessionEvent (
-	const rfa::sessionLayer::OMMInactiveClientSessionEvent& session_event
+bool
+usagi::provider_t::eraseClientSession (
+	rfa::common::Handle* handle
 	)
 {
-	cumulative_stats_[PROVIDER_PC_OMM_INACTIVE_CLIENT_SESSION_RECEIVED]++;
+/* unregister RFA client session. */
+	omm_provider_->unregisterClient (handle);
+/* remove client from directory. */
+	auto it = clients_.find (handle);
+	if (clients_.end() == it)
+		return false;
+	clients_.erase (it);
+	return true;
 }
 
 /* 7.3.5.5 Making Request for Service Directory

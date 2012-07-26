@@ -35,7 +35,6 @@ namespace usagi
 		PROVIDER_PC_OMM_ACTIVE_CLIENT_SESSION_RECEIVED,
 		PROVIDER_PC_CLIENT_SESSION_REJECTED,
 		PROVIDER_PC_CLIENT_SESSION_ACCEPTED,
-		PROVIDER_PC_OMM_INACTIVE_CLIENT_SESSION_RECEIVED,
 /* marker */
 		PROVIDER_PC_MAX
 	};
@@ -52,7 +51,7 @@ namespace usagi
 /* Fixed name for this stream. */
 		rfa::common::RFA_String rfa_name;
 /* Request tokens for clients, can be more than one per client. */
-		std::unordered_map<rfa::sessionLayer::RequestToken*, client_t*> clients;
+		std::unordered_map<rfa::sessionLayer::RequestToken*, std::shared_ptr<client_t>> clients;
 	};
 
 	class provider_t :
@@ -81,11 +80,11 @@ namespace usagi
 	private:
 		void processConnectionEvent (const rfa::sessionLayer::ConnectionEvent& event);
 		void processOMMActiveClientSessionEvent (const rfa::sessionLayer::OMMActiveClientSessionEvent& event);
-		void processOMMInactiveClientSessionEvent (const rfa::sessionLayer::OMMInactiveClientSessionEvent& event);
 		void processOMMCmdErrorEvent (const rfa::sessionLayer::OMMCmdErrorEvent& event);
 
 		bool rejectClientSession (const rfa::common::Handle* handle);
 		bool acceptClientSession (const rfa::common::Handle* handle);
+		bool eraseClientSession (rfa::common::Handle* handle);
 
 		void getDirectoryResponse (rfa::message::RespMsg* msg, uint8_t rwf_major_version, uint8_t rwf_minor_version, const char* service_name, uint32_t filter_mask, uint8_t response_type);
 		void getServiceDirectory (rfa::data::Map* map, uint8_t rwf_major_version, uint8_t rwf_minor_version, const char* service_name, uint32_t filter_mask);
@@ -119,8 +118,8 @@ namespace usagi
 /* RFA Error Item event consumer */
 		rfa::common::Handle* error_item_handle_;
 
-/* RFA Client Sessions */
-		std::vector<std::shared_ptr<client_t>> clients_;
+/* RFA Client Session directory */
+		std::unordered_map<rfa::common::Handle*const, std::shared_ptr<client_t>> clients_;
 
 		friend client_t;
 

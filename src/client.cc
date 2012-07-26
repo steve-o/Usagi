@@ -28,13 +28,12 @@ static const int kRdmRdnDisplayId = 2;		/* RDNDISPLAY */
 using rfa::common::RFA_String;
 
 usagi::client_t::client_t (
-	usagi::provider_t& provider,
-	const rfa::common::Handle* handle
+	usagi::provider_t& provider
 	) :
 	creation_time_ (boost::posix_time::second_clock::universal_time()),
 	last_activity_ (creation_time_),
 	provider_ (provider),
-	handle_ (handle),
+	handle_ (nullptr),
 	login_token_ (nullptr),
 	rwf_major_version_ (0),
 	rwf_minor_version_ (0),
@@ -45,26 +44,34 @@ usagi::client_t::client_t (
 	ZeroMemory (cumulative_stats_, sizeof (cumulative_stats_));
 	ZeroMemory (snap_stats_, sizeof (snap_stats_));
 
-/* Set logger ID */
-	std::ostringstream ss;
-	ss << handle_ << ':';
-	prefix_.assign (ss.str());
+	resetPrefix();
 }
 
 usagi::client_t::~client_t()
 {
 	using namespace boost::posix_time;
 	auto uptime = second_clock::universal_time() - creation_time_;
-	VLOG(3) << prefix_ << ": Summary: {"
+	VLOG(3) << prefix_ << "Summary: {"
 		 " \"Uptime\": \"" << to_simple_string (uptime) << "\""
 		", \"RfaEventsReceived\": " << cumulative_stats_[CLIENT_PC_RFA_EVENTS_RECEIVED] <<
 		", \"RfaMessagesSent\": " << cumulative_stats_[CLIENT_PC_RFA_MSGS_SENT] <<
 		" }";
 }
-	
+
+/* Set logger ID */
+void
+usagi::client_t::resetPrefix()
+{
+	std::ostringstream ss;
+	ss << handle_ << ':';
+	prefix_.assign (ss.str());
+}
+
 bool
 usagi::client_t::getAssociatedMetaInfo()
 {
+	DCHECK(nullptr != handle_);
+
 	last_activity_ = boost::posix_time::second_clock::universal_time();
 
 /* Store negotiated Reuters Wire Format version information. */
@@ -91,6 +98,10 @@ usagi::client_t::processEvent (
 	switch (event_.getType()) {
 	case rfa::sessionLayer::OMMSolicitedItemEventEnum:
 		processOMMSolicitedItemEvent (static_cast<const rfa::sessionLayer::OMMSolicitedItemEvent&>(event_));
+		break;
+
+	case rfa::sessionLayer::OMMInactiveClientSessionEventEnum:
+		processOMMInactiveClientSessionEvent(static_cast<const rfa::sessionLayer::OMMInactiveClientSessionEvent&>(event_));
 		break;
 
         default:
@@ -609,7 +620,7 @@ usagi::client_t::processItemRequest (
 				auto stream = it->second.lock();
 				DCHECK ((bool)stream);
 				items_.emplace (std::make_pair (&request_token, stream));
-				stream->clients.emplace (std::make_pair (&request_token, this));
+				stream->clients.emplace (std::make_pair (&request_token, shared_from_this()));
 				sendBlankResponse (request_token, service_id, model_type, item_name);
 			}
 		}
@@ -619,6 +630,46 @@ usagi::client_t::processItemRequest (
 				   "\"StatusText\": \"" << e.getStatus().getStatusText() << "\"" <<
 				", " << request_msg <<
 				", \"RequestToken\": " << (intptr_t)&request_token <<
+				" }";
+	}
+}
+
+/* 7.4.7.1.2 Handling Consumer Client Session Events: Client session connection
+ *           has been lost.
+ *
+ * When the provider receives this event it should stop sending any data to that
+ * client session. Then it should remove references to the client session handle
+ * and its associated request tokens.
+ */
+void
+usagi::client_t::processOMMInactiveClientSessionEvent (
+	const rfa::sessionLayer::OMMInactiveClientSessionEvent& session_event
+	)
+{
+	DCHECK(nullptr != handle_);
+	cumulative_stats_[CLIENT_PC_OMM_INACTIVE_CLIENT_SESSION_RECEIVED]++;
+	try {
+/* remove requests from item streams. */
+		VLOG(2) << prefix_ << "Removing client from " << items_.size() << " item streams.";
+		std::for_each (items_.begin(), items_.end(),
+			[&](const std::pair<rfa::sessionLayer::RequestToken*, std::weak_ptr<item_stream_t>>& item)
+		{
+			auto sp = item.second.lock();
+			if (!(bool)sp)
+				return;
+			auto it = sp->clients.find (item.first);
+			DCHECK(sp->clients.end() != it);
+			sp->clients.erase (it);
+			VLOG(2) << prefix_ << sp->rfa_name;
+		});
+/* forward upstream to remove reference to this. */
+		provider_.eraseClientSession (handle_);
+/* handle is now invalid. */
+		handle_ = nullptr;
+/* ignore any error */
+	} catch (rfa::common::InvalidUsageException& e) {
+		LOG(ERROR) << prefix_ << "OMMInactiveClientSession::InvalidUsageException: { "
+				"\"StatusText\": \"" << e.getStatus().getStatusText() << "\""
 				" }";
 	}
 }
@@ -732,7 +783,7 @@ usagi::client_t::sendBlankResponse (
 	} catch (rfa::common::InvalidUsageException& e) {
 		cumulative_stats_[CLIENT_PC_ITEM_MALFORMED]++;
 		LOG(ERROR) << prefix_ <<
-			"nvalidUsageException: { " <<
+			"InvalidUsageException: { " <<
 			   "\"StatusText\": \"" << e.getStatus().getStatusText() << "\""
 			", " << response <<
 			" }";

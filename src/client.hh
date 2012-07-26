@@ -7,6 +7,7 @@
 
 #include <cstdint>
 #include <forward_list>
+#include <memory>
 #include <unordered_map>
 
 /* Boost Posix Time */
@@ -56,6 +57,7 @@ namespace usagi
 		CLIENT_PC_ITEM_NOT_FOUND,
 		CLIENT_PC_ITEM_SENT,
 		CLIENT_PC_ITEM_CLOSED,
+		CLIENT_PC_OMM_INACTIVE_CLIENT_SESSION_RECEIVED,
 /* marker */
 		CLIENT_PC_MAX
 	};
@@ -64,11 +66,12 @@ namespace usagi
 	class item_stream_t;
 
 	class client_t :
+		public std::enable_shared_from_this<client_t>,
 		public rfa::common::Client,
 		boost::noncopyable
 	{
 	public:
-		client_t (provider_t& provider, const rfa::common::Handle* handle);
+		client_t (provider_t& provider);
 		~client_t();
 
 		bool getAssociatedMetaInfo();
@@ -76,7 +79,11 @@ namespace usagi
 /* RFA event callback. */
 		void processEvent (const rfa::common::Event& event);
 
-		const rfa::common::Handle* getHandle() const {
+		void setHandle (rfa::common::Handle*const handle) {
+			handle_ = handle;
+			resetPrefix();
+		}
+		rfa::common::Handle*const getHandle() const {
 			return handle_;
 		}
 		uint8_t getRwfMajorVersion() const {
@@ -99,7 +106,7 @@ namespace usagi
                 void processLoginSuccess (const rfa::message::RespMsg& msg);
                 void processLoginSuspect (const rfa::message::RespMsg& msg);
                 void processLoginClosed (const rfa::message::RespMsg& msg);
-		void processOMMCmdErrorEvent (const rfa::sessionLayer::OMMCmdErrorEvent& event);
+		void processOMMInactiveClientSessionEvent (const rfa::sessionLayer::OMMInactiveClientSessionEvent& event);
 
 		bool rejectLogin (const rfa::message::ReqMsg& msg, rfa::sessionLayer::RequestToken& login_token);
 		bool acceptLogin (const rfa::message::ReqMsg& msg, rfa::sessionLayer::RequestToken& login_token);
@@ -111,19 +118,21 @@ namespace usagi
 
 		uint32_t submit (rfa::common::Msg& msg, rfa::sessionLayer::RequestToken& token, void* closure) throw (rfa::common::InvalidUsageException);
 
+		void resetPrefix();
+
 		provider_t& provider_;
 
 /* unique id per connection. */
 		std::string prefix_;
 
 /* RFA Client Session event consumer. */
-		const rfa::common::Handle* handle_;
+		rfa::common::Handle* handle_;
 
 /* RFA login token for closing out the Client Session. */
 		rfa::sessionLayer::RequestToken* login_token_;
 
 /* Watchlist of all items. */
-		std::unordered_map<rfa::sessionLayer::RequestToken*, std::weak_ptr<item_stream_t>> items_;
+		std::unordered_map<rfa::sessionLayer::RequestToken*const, std::weak_ptr<item_stream_t>> items_;
 
 /* Reuters Wire Format versions. */
 		uint8_t rwf_major_version_;
@@ -138,6 +147,8 @@ namespace usagi
 /* Last RespStatus details. */
 		int stream_state_;
 		int data_state_;
+
+		friend provider_t;
 
 /** Performance Counters **/
 		boost::posix_time::ptime creation_time_, last_activity_;
