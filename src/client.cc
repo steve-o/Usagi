@@ -540,9 +540,9 @@ usagi::client_t::processItemRequest (
  * a reply.
  */
 	try {
-		const uint32_t service_id    = request_msg.getAttribInfo().getServiceID();
-		const uint8_t  model_type    = request_msg.getMsgModelType();
-		const char*    item_name     = request_msg.getAttribInfo().getName().c_str();
+		const uint32_t service_id = request_msg.getAttribInfo().getServiceID();
+		const uint8_t  model_type = request_msg.getMsgModelType();
+		const char*    item_name  = request_msg.getAttribInfo().getName().c_str();
 		const bool use_attribinfo_in_updates = (0 != (request_msg.getIndicationMask() & rfa::message::ReqMsg::AttribInfoInUpdatesFlag));
 
 /* Only accept MMT_MARKET_PRICE. */
@@ -595,6 +595,14 @@ usagi::client_t::processItemRequest (
 		}
 		else
 		{
+/* capture ServiceID */
+			if (0 == provider_.getServiceId()
+			    && 0 == request_msg.getAttribInfo().getServiceName().compareCase (provider_.getServiceName()))
+			{
+				LOG(INFO) << prefix_ << "Detected service id #" << service_id << " for \"" << provider_.getServiceName() << "\".";
+				provider_.setServiceId (service_id);
+			}
+
 /* new request. */
 			if (is_close)
 			{
@@ -620,7 +628,8 @@ usagi::client_t::processItemRequest (
 				auto stream = it->second.lock();
 				DCHECK ((bool)stream);
 				items_.emplace (std::make_pair (&request_token, stream));
-				stream->clients.emplace (std::make_pair (&request_token, shared_from_this()));
+				stream->clients.emplace (std::make_pair (&request_token, 
+									 std::make_pair (shared_from_this(), use_attribinfo_in_updates)));
 				sendBlankResponse (request_token, service_id, model_type, item_name);
 			}
 		}

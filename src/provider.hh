@@ -6,8 +6,9 @@
 #pragma once
 
 #include <cstdint>
-#include <forward_list>
+#include <memory>
 #include <unordered_map>
+#include <utility>
 
 /* Boost Posix Time */
 #include <boost/date_time/posix_time/posix_time.hpp>
@@ -51,7 +52,8 @@ namespace usagi
 /* Fixed name for this stream. */
 		rfa::common::RFA_String rfa_name;
 /* Request tokens for clients, can be more than one per client. */
-		std::unordered_map<rfa::sessionLayer::RequestToken*, std::shared_ptr<client_t>> clients;
+		std::unordered_map<rfa::sessionLayer::RequestToken*, 
+				   std::pair<std::shared_ptr<client_t>, bool>> clients;
 	};
 
 	class provider_t :
@@ -65,16 +67,22 @@ namespace usagi
 		bool init() throw (rfa::common::InvalidConfigurationException, rfa::common::InvalidUsageException);
 
 		bool createItemStream (const char* name, std::shared_ptr<item_stream_t> item_stream) throw (rfa::common::InvalidUsageException);
-		bool send (item_stream_t& item_stream, rfa::common::Msg& msg) throw (rfa::common::InvalidUsageException);
+		bool send (item_stream_t& item_stream, rfa::message::RespMsg& msg, const rfa::message::AttribInfo& attribInfo) throw (rfa::common::InvalidUsageException);
 
 /* RFA event callback. */
 		void processEvent (const rfa::common::Event& event) override;
 
-		uint8_t getRwfMajorVersion() {
+		uint8_t getRwfMajorVersion() const {
 			return min_rwf_major_version_;
 		}
-		uint8_t getRwfMinorVersion() {
+		uint8_t getRwfMinorVersion() const {
 			return min_rwf_minor_version_;
+		}
+		const char* getServiceName() const {
+			return config_.service_name.c_str();
+		}
+		uint32_t getServiceId() const {
+			return service_id_;
 		}
 
 	private:
@@ -96,6 +104,10 @@ namespace usagi
 
 		uint32_t send (rfa::common::Msg& msg, rfa::sessionLayer::RequestToken& token, void* closure) throw (rfa::common::InvalidUsageException);
 		uint32_t submit (rfa::common::Msg& msg, rfa::sessionLayer::RequestToken& token, void* closure) throw (rfa::common::InvalidUsageException);
+
+		void setServiceId (uint32_t service_id) {
+			service_id_ = service_id;
+		}
 
 		const config_t& config_;
 
@@ -126,6 +138,9 @@ namespace usagi
 /* Reuters Wire Format versions. */
 		uint8_t min_rwf_major_version_;
 		uint8_t min_rwf_minor_version_;
+
+/* Directory mapped ServiceID */
+		uint32_t service_id_;
 
 /* Pre-allocated shared resource. */
 		rfa::data::Map map_;

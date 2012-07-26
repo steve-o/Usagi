@@ -39,6 +39,7 @@ usagi::provider_t::provider_t (
 	error_item_handle_ (nullptr),
 	min_rwf_major_version_ (0),
 	min_rwf_minor_version_ (0),
+	service_id_ (0),
 	is_accepting_connections_ (true),
 	is_accepting_requests_ (true),
 	is_muted_ (false)
@@ -54,7 +55,6 @@ usagi::provider_t::~provider_t()
 		[&](std::pair<rfa::common::Handle*const, std::shared_ptr<client_t>>& client)
 	{
 		CHECK ((bool)client.second);
-//		omm_provider_->unregisterClient (const_cast<rfa::common::Handle*> (client.first));
 		omm_provider_->unregisterClient (client.first);
 	});
 	if (nullptr != error_item_handle_)
@@ -153,17 +153,37 @@ usagi::provider_t::createItemStream (
 bool
 usagi::provider_t::send (
 	item_stream_t& item_stream,
-	rfa::common::Msg& msg
+	rfa::message::RespMsg& msg,
+	const rfa::message::AttribInfo& attribInfo
 )
 {
 	unsigned i = 0;
+/* first iteration without AttribInfo */
 	std::for_each (item_stream.clients.begin(), item_stream.clients.end(),
-		[&](const std::pair<rfa::sessionLayer::RequestToken*, std::shared_ptr<client_t>>& client)
+		[&](const std::pair<rfa::sessionLayer::RequestToken*,
+				    std::pair<std::shared_ptr<client_t>, bool>>& client)
 	{
-		send (msg, *(client.first), nullptr);
-		client.second->cumulative_stats_[CLIENT_PC_RFA_MSGS_SENT]++;
+		if (client.second.second)
+			return;
+		send (static_cast<rfa::common::Msg&> (msg), *(client.first), nullptr);
+		client.second.first->cumulative_stats_[CLIENT_PC_RFA_MSGS_SENT]++;
 		++i;
 	});
+/* second iteration with AttribInfo */
+	if (i < item_stream.clients.size())
+	{
+		msg.setAttribInfo (attribInfo);
+		std::for_each (item_stream.clients.begin(), item_stream.clients.end(),
+			[&](const std::pair<rfa::sessionLayer::RequestToken*,
+					    std::pair<std::shared_ptr<client_t>, bool>>& client)
+		{
+			if (!client.second.second)
+				return;
+			send (static_cast<rfa::common::Msg&> (msg), *(client.first), nullptr);
+			client.second.first->cumulative_stats_[CLIENT_PC_RFA_MSGS_SENT]++;
+			++i;
+		});
+	}
 	cumulative_stats_[PROVIDER_PC_MSGS_SENT]++;
 	last_activity_ = boost::posix_time::second_clock::universal_time();
 	return true;

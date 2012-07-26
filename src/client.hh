@@ -6,7 +6,6 @@
 #pragma once
 
 #include <cstdint>
-#include <forward_list>
 #include <memory>
 #include <unordered_map>
 

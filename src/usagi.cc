@@ -231,6 +231,12 @@ usagi::usagi_t::sendRefresh()
 /* 7.5.9.4 Set the response type enumation. */
 	response.setRespTypeNum (rfa::rdm::REFRESH_UNSOLICITED);
 
+/* 7.5.9.5 Create or re-use a request attribute object (4.2.4) */
+	rfa::message::AttribInfo attribInfo (false);	/* reference */
+	attribInfo.setNameType (rfa::rdm::INSTRUMENT_NAME_RIC);
+	attribInfo.setName (msft_stream_->rfa_name);
+	attribInfo.setServiceID (provider_->getServiceId());
+
 /* 4.3.1 RespMsg.Payload */
 // not std::map :(  derived from rfa::common::Data
 	fields_.setAssociatedMetaInfo (provider_->getRwfMajorVersion(), provider_->getRwfMinorVersion());
@@ -276,7 +282,7 @@ usagi::usagi_t::sendRefresh()
 	}
 #endif
 
-	provider_->send (*msft_stream_.get(), static_cast<rfa::common::Msg&> (response));
+	provider_->send (*msft_stream_.get(), response, attribInfo);
 	LOG(INFO) << "Sent refresh.";
 	return true;
 }
