@@ -139,6 +139,10 @@ namespace usagi
 
 /* Publish fields. */
 		rfa::data::FieldList fields_;
+		rfa::message::AttribInfo attribInfo_;
+
+/* Iterator for populating publish fields */
+		rfa::data::SingleWriteIterator single_write_it_;
 
 /* Thread timer. */
 		std::unique_ptr<time_pump_t<boost::chrono::system_clock>> timer_;

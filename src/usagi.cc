@@ -74,6 +74,11 @@ usagi::usagi_t::run ()
 			goto cleanup;
 		msft_stream_ = std::move (stream);
 
+/* Pre-allocate memory buffer for payload iterator */
+		CHECK (config_.maximum_data_size > 0);
+		single_write_it_.initialize (fields_, (uint32_t)config_.maximum_data_size);
+		CHECK (single_write_it_.isInitialized());
+
 	} catch (rfa::common::InvalidUsageException& e) {
 		LOG(ERROR) << "InvalidUsageException: { "
 			  "\"Severity\": \"" << severity_string (e.getSeverity()) << "\""
@@ -232,32 +237,31 @@ usagi::usagi_t::sendRefresh()
 	response.setRespTypeNum (rfa::rdm::REFRESH_UNSOLICITED);
 
 /* 7.5.9.5 Create or re-use a request attribute object (4.2.4) */
-	rfa::message::AttribInfo attribInfo (false);	/* reference */
-	attribInfo.setNameType (rfa::rdm::INSTRUMENT_NAME_RIC);
-	attribInfo.setName (msft_stream_->rfa_name);
-	attribInfo.setServiceID (provider_->getServiceId());
+	attribInfo_.clear();
+	attribInfo_.setNameType (rfa::rdm::INSTRUMENT_NAME_RIC);
+	attribInfo_.setName (msft_stream_->rfa_name);
+	attribInfo_.setServiceID (provider_->getServiceId());
 
 /* 4.3.1 RespMsg.Payload */
 // not std::map :(  derived from rfa::common::Data
 	fields_.setAssociatedMetaInfo (provider_->getRwfMajorVersion(), provider_->getRwfMinorVersion());
 	fields_.setInfo (kDictionaryId, kFieldListId);
 
-	rfa::data::FieldListWriteIterator it;
+/* Clear required for SingleWriteIterator state machine. */
+	auto& it = single_write_it_;
+	DCHECK (it.isInitialized());
+	it.clear();
 	it.start (fields_);
 
-	rfa::data::FieldEntry field (true);
-	rfa::data::DataBuffer dataBuffer (true);
-	rfa::data::Real64 real64;
+	rfa::data::FieldEntry field (false);
 
 	field.setFieldID (kRdmRdnDisplayId);
-	dataBuffer.setUInt32 (100);
-	field.setData (dataBuffer), it.bind (field);
+	it.bind (field);
+	it.setUInt (100);
 
 	field.setFieldID (kRdmTradePriceId);
-	real64.setValue (++msft_stream_->count);
-	real64.setMagnitudeType (rfa::data::Exponent0);
-	dataBuffer.setReal64 (real64);
-	field.setData (dataBuffer), it.bind (field);
+	it.bind (field);
+	it.setReal (++msft_stream_->count, rfa::data::Exponent0);
 
 	it.complete();
 /* Set a reference to field list, not a copy */
@@ -282,7 +286,7 @@ usagi::usagi_t::sendRefresh()
 	}
 #endif
 
-	provider_->send (*msft_stream_.get(), response, attribInfo);
+	provider_->send (*msft_stream_.get(), response, attribInfo_);
 	LOG(INFO) << "Sent refresh.";
 	return true;
 }
