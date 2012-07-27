@@ -147,6 +147,9 @@ namespace usagi
 		rfa::message::AttribInfo attribInfo_;
 		rfa::common::RespStatus status_;
 
+/* Iterator for populating publish fields */
+		rfa::data::SingleWriteIterator single_write_it_;
+
 /* RFA can reject new client requests whilst maintaining current connected sessions.
  */
 		bool is_accepting_connections_;

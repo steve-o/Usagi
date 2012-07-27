@@ -40,6 +40,9 @@ usagi::provider_t::provider_t (
 	min_rwf_major_version_ (0),
 	min_rwf_minor_version_ (0),
 	service_id_ (0),
+	map_ (false),		/* reference */
+	attribInfo_ (false),	/* reference */
+
 	is_accepting_connections_ (true),
 	is_accepting_requests_ (true),
 	is_muted_ (false)
@@ -50,7 +53,7 @@ usagi::provider_t::provider_t (
 
 usagi::provider_t::~provider_t()
 {
-	VLOG(3) << "Unregistering RFA session clients.";
+	VLOG(3) << "Unregistering " << clients_.size() << " RFA session clients.";
 	std::for_each (clients_.begin(), clients_.end(),
 		[&](std::pair<rfa::common::Handle*const, std::shared_ptr<client_t>>& client)
 	{
@@ -92,6 +95,11 @@ usagi::provider_t::init()
  */
 	if (!rfa_->VerifyVersion())
 		return false;
+
+/* Pre-allocate memory buffer for payload iterator */
+	CHECK (config_.maximum_data_size > 0);
+	single_write_it_.initialize (map_, (uint32_t)config_.maximum_data_size);
+	CHECK (single_write_it_.isInitialized());
 
 /* 7.4.5 Initializing an OMM Interactive Provider. */
 	VLOG(3) << "Creating OMM provider.";
@@ -448,6 +456,8 @@ usagi::provider_t::getDirectoryResponse (
 	response->setRespStatus (status_);
 }
 
+/* Populate map with service directory, must be cleared before call.
+ */
 void
 usagi::provider_t::getServiceDirectory (
 	rfa::data::Map* map,
@@ -457,29 +467,39 @@ usagi::provider_t::getServiceDirectory (
 	uint32_t filter_mask
 	)
 {
-	rfa::data::MapWriteIterator it;
-	rfa::data::MapEntry mapEntry;
-	rfa::data::DataBuffer dataBuffer;
-	rfa::data::FilterList filterList;
-	const RFA_String serviceName (config_.service_name.c_str(), 0, false);
-
+/* Recommended meta-data for a map. */
 	map->setAssociatedMetaInfo (rwf_major_version, rwf_minor_version);
 /* No idea ... */
 	map->setKeyDataType (rfa::data::DataBuffer::StringAsciiEnum);
-	it.start (*map);
 
-	if (nullptr == service_name || 0 == serviceName.compareCase (service_name))
+/* Request service filter does not match provided service. */
+	const RFA_String serviceName (config_.service_name.c_str(), 0, false);
+	if (nullptr != service_name && 0 != serviceName.compareCase (service_name))
 	{
-/* One service. */
-		map->setTotalCountHint (1);
-/* Service name -> service filter list */
-		mapEntry.setAction (rfa::data::MapEntry::Add);
-		dataBuffer.setFromString (serviceName, rfa::data::DataBuffer::StringAsciiEnum);
-		mapEntry.setKeyData (dataBuffer);
-		getServiceFilterList (&filterList, rwf_major_version, rwf_minor_version, filter_mask);
-		mapEntry.setData (static_cast<rfa::common::Data&>(filterList));
-		it.bind (mapEntry);
+		return;
 	}
+
+/* Clear required for SingleWriteIterator state machine. */
+	auto& it = single_write_it_;
+	DCHECK (it.isInitialized());
+	it.clear();
+
+/* One service. */
+	map->setTotalCountHint (1);
+	map->setIndicationMask (rfa::data::Map::EntriesFlag);
+
+	it.start (*map, rfa::data::FilterListEnum);
+
+	rfa::data::MapEntry mapEntry (false);
+	rfa::data::DataBuffer dataBuffer (false);
+	rfa::data::FilterList filterList (false);
+
+/* Service name -> service filter list */
+	mapEntry.setAction (rfa::data::MapEntry::Add);
+	dataBuffer.setFromString (serviceName, rfa::data::DataBuffer::StringAsciiEnum);
+	mapEntry.setKeyData (dataBuffer);
+	it.bind (mapEntry);
+	getServiceFilterList (&filterList, rwf_major_version, rwf_minor_version, filter_mask);
 
 	it.complete();
 }
@@ -492,32 +512,33 @@ usagi::provider_t::getServiceFilterList (
 	uint32_t filter_mask
 	)
 {
-	rfa::data::FilterListWriteIterator it;
-	rfa::data::FilterEntry filterEntry;
-	rfa::data::ElementList elementList;
+/* 5.3.8 Encoding with a SingleWriteIterator
+ * Re-use of SingleWriteIterator permitted cross MapEntry and FieldList.
+ */
+	auto& it = single_write_it_;
+	rfa::data::FilterEntry filterEntry (false);
+	rfa::data::ElementList elementList (false);
 
 	filterList->setAssociatedMetaInfo (rwf_major_version, rwf_minor_version);
-	it.start (*filterList);  
+	filterEntry.setAction (rfa::data::FilterEntry::Set);
 
+/* Determine entry count for encoder hinting */
 	const bool use_info_filter  = (0 != (filter_mask & rfa::rdm::SERVICE_INFO_FILTER));
 	const bool use_state_filter = (0 != (filter_mask & rfa::rdm::SERVICE_STATE_FILTER));
 	const unsigned filter_count = (use_info_filter ? 1 : 0) + (use_state_filter ? 1 : 0);
 	filterList->setTotalCountHint (filter_count);
 
+	it.start (*filterList, rfa::data::ElementListEnum);  
+
 	if (use_info_filter) {
 		filterEntry.setFilterId (rfa::rdm::SERVICE_INFO_ID);
-		filterEntry.setAction (rfa::data::FilterEntry::Set);
+		it.bind (filterEntry, rfa::data::ElementListEnum);
 		getServiceInformation (&elementList, rwf_major_version, rwf_minor_version);
-		filterEntry.setData (static_cast<const rfa::common::Data&>(elementList));
-		it.bind (filterEntry);
 	}
-
 	if (use_state_filter) {
 		filterEntry.setFilterId (rfa::rdm::SERVICE_STATE_ID);
-		filterEntry.setAction (rfa::data::FilterEntry::Set);
+		it.bind (filterEntry, rfa::data::ElementListEnum);
 		getServiceState (&elementList, rwf_major_version, rwf_minor_version);
-		filterEntry.setData (static_cast<const rfa::common::Data&>(elementList));
-		it.bind (filterEntry);
 	}
 
 	it.complete();
@@ -533,11 +554,9 @@ usagi::provider_t::getServiceInformation (
 	uint8_t rwf_minor_version
 	)
 {
-	rfa::data::ElementListWriteIterator it;
-	rfa::data::ElementEntry element;
-	rfa::data::DataBuffer dataBuffer;
-	rfa::data::Array array_;
-	const RFA_String serviceName (config_.service_name.c_str(), 0, false);
+	auto& it = single_write_it_;
+	rfa::data::ElementEntry element (false);
+	rfa::data::Array array_ (false);
 
 	elementList->setAssociatedMetaInfo (rwf_major_version, rwf_minor_version);
 	it.start (*elementList);
@@ -547,9 +566,9 @@ usagi::provider_t::getServiceInformation (
  * name that is in the Map.Key.
  */
 	element.setName (rfa::rdm::ENAME_NAME);
-	dataBuffer.setFromString (serviceName, rfa::data::DataBuffer::StringAsciiEnum);
-	element.setData (dataBuffer);
 	it.bind (element);
+	const RFA_String serviceName (config_.service_name.c_str(), 0, false);
+	it.setString (serviceName, rfa::data::DataBuffer::StringAsciiEnum);
 	
 /* Capabilities<Array of UInt>
  * Array of valid MessageModelTypes that the service can provide. The UInt
@@ -559,9 +578,8 @@ usagi::provider_t::getServiceInformation (
  * service if the MessageModelType of the request is listed in this element.
  */
 	element.setName (rfa::rdm::ENAME_CAPABILITIES);
-	getServiceCapabilities (&array_);
-	element.setData (static_cast<const rfa::common::Data&>(array_));
 	it.bind (element);
+	getServiceCapabilities (&array_);
 
 /* DictionariesUsed<Array of AsciiString>
  * List of Dictionary names that may be required to process all of the data 
@@ -569,9 +587,8 @@ usagi::provider_t::getServiceInformation (
  * the needs of the consumer (e.g. display application, caching application)
  */
 	element.setName (rfa::rdm::ENAME_DICTIONARYS_USED);
-	getServiceDictionaries (&array_);
-	element.setData (static_cast<const rfa::common::Data&>(array_));
 	it.bind (element);
+	getServiceDictionaries (&array_);
 
 	it.complete();
 }
@@ -584,16 +601,14 @@ usagi::provider_t::getServiceCapabilities (
 	rfa::data::Array* capabilities
 	)
 {
-	rfa::data::ArrayWriteIterator it;
-	rfa::data::ArrayEntry arrayEntry;
-	rfa::data::DataBuffer dataBuffer;
+	auto& it = single_write_it_;
+	rfa::data::ArrayEntry arrayEntry (false);
 
-	it.start (*capabilities);
+	it.start (*capabilities, rfa::data::DataBuffer::UIntEnum);
 
 /* MarketPrice = 6 */
-	dataBuffer.setUInt32 (rfa::rdm::MMT_MARKET_PRICE);
-	arrayEntry.setData (dataBuffer);
 	it.bind (arrayEntry);
+	it.setUInt (rfa::rdm::MMT_MARKET_PRICE);
 
 	it.complete();
 }
@@ -603,21 +618,18 @@ usagi::provider_t::getServiceDictionaries (
 	rfa::data::Array* dictionaries
 	)
 {
-	rfa::data::ArrayWriteIterator it;
-	rfa::data::ArrayEntry arrayEntry;
-	rfa::data::DataBuffer dataBuffer;
+	auto& it = single_write_it_;
+	rfa::data::ArrayEntry arrayEntry (false);
 
-	it.start (*dictionaries);
+	it.start (*dictionaries, rfa::data::DataBuffer::StringAsciiEnum);
 
 /* RDM Field Dictionary */
-	dataBuffer.setFromString (kRdmFieldDictionaryName, rfa::data::DataBuffer::StringAsciiEnum);
-	arrayEntry.setData (dataBuffer);
 	it.bind (arrayEntry);
+	it.setString (kRdmFieldDictionaryName, rfa::data::DataBuffer::StringAsciiEnum);
 
 /* Enumerated Type Dictionary */
-	dataBuffer.setFromString (kEnumTypeDictionaryName, rfa::data::DataBuffer::StringAsciiEnum);
-	arrayEntry.setData (dataBuffer);
 	it.bind (arrayEntry);
+	it.setString (kEnumTypeDictionaryName, rfa::data::DataBuffer::StringAsciiEnum);
 
 	it.complete();
 }
@@ -632,9 +644,8 @@ usagi::provider_t::getServiceState (
 	uint8_t rwf_minor_version
 	)
 {
-	rfa::data::ElementListWriteIterator it;
-	rfa::data::ElementEntry element;
-	rfa::data::DataBuffer dataBuffer;
+	auto& it = single_write_it_;
+	rfa::data::ElementEntry element (false);
 
 	elementList->setAssociatedMetaInfo (rwf_major_version, rwf_minor_version);
 	it.start (*elementList);
@@ -646,9 +657,8 @@ usagi::provider_t::getServiceState (
  * existing streams are left unchanged.
  */
 	element.setName (rfa::rdm::ENAME_SVC_STATE);
-	dataBuffer.setUInt32 (1);
-	element.setData (dataBuffer);
 	it.bind (element);
+	it.setUInt (1);
 
 /* AcceptingRequests<UInt>
  * 1: Yes
@@ -659,9 +669,9 @@ usagi::provider_t::getServiceState (
  * existing streams are left unchanged.
  */
 	element.setName (rfa::rdm::ENAME_ACCEPTING_REQS);
-	dataBuffer.setUInt32 (is_accepting_requests_ ? 1 : 0);
-	element.setData (dataBuffer);
 	it.bind (element);
+	it.setUInt (is_accepting_requests_ ? 1 : 0);
+
 	it.complete();
 }
 

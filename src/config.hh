@@ -45,6 +45,9 @@ namespace usagi
 //  RFA vendor name.
 		std::string vendor_name;
 
+//  RFA maximum data buffer size for SingleWriteIterator.
+		size_t maximum_data_size;
+
 //  Client session capacity.
 		size_t session_capacity;
 	};
@@ -61,6 +64,7 @@ namespace usagi
 			", \"connection_name\": \"" << config.connection_name << "\""
 			", \"publisher_name\": \"" << config.publisher_name << "\""
 			", \"vendor_name\": \"" << config.vendor_name << "\""
+			", \"maximum_data_size\": \"" << config.maximum_data_size << "\""
 			", \"session_capacity\": " << config.session_capacity << 
 			" }";
 		return o;
