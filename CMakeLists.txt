@@ -6,12 +6,37 @@ cmake_minimum_required (VERSION 2.8.8)
 
 project (Usagi)
 
+# Thomson Reuters Robust Foundation API
 set(RFA_ROOT D:/rfa7.2.1.L1.win-shared.rrg)
+set(RFA_INCLUDE_DIRS
+	${RFA_ROOT}/Include
+	${RFA_ROOT}/Include/rwf
+)
+set(RFA_LIBRARY_DIR ${RFA_ROOT}/Libs/WIN_64_VS100/Release_MD)
+set(RFA_LIBRARY_DIRS ${RFA_LIBRARY_DIR})
+set(RFA_LIBRARIES
+	RFA7_Common100_x64.lib
+	RFA7_Config100_x64.lib
+	RFA7_Logger100_x64.lib
+	RFA7_Data100_x64.lib
+	RFA7_Connections100_x64.lib
+	RFA7_Connections_OMM100_x64.lib
+	RFA7_SessionLayer100_x64.lib
+	DACS7_lock100_x64.lib
+)
+
+# ZeroMQ SDK 2.2.0
+set(ZEROMQ_ROOT "C:/Program Files/ZeroMQ 2.2.0")
+set(ZEROMQ_INCLUDE_DIRS "${ZEROMQ_ROOT}/include")
+set(ZEROMQ_LIBRARY_DIRS "${ZEROMQ_ROOT}/lib")
+set(ZEROMQ_LIBRARIES
+	libzmq-v100-mt.lib
+)
+
+# Boost headers plus built libraries
 set(BOOST_ROOT D:/boost_1_50_0)
 set(BOOST_LIBRARYDIR ${BOOST_ROOT}/stage/lib)
-
 set(Boost_USE_STATIC_LIBS ON)
-
 find_package (Boost 1.50 COMPONENTS chrono thread REQUIRED)
 
 #-----------------------------------------------------------------------------
@@ -80,13 +105,14 @@ set(cxx-sources
 
 include_directories(
 	include
-	${RFA_ROOT}/Include
-	${RFA_ROOT}/Include/rwf
+	${RFA_INCLUDE_DIRS}
+	${ZEROMQ_INCLUDE_DIRS}
 	${Boost_INCLUDE_DIRS}
 )
 
 link_directories(
-	${RFA_ROOT}/Libs/WIN_64_VS100/Release_MD
+	${RFA_LIBRARY_DIRS}
+	${ZEROMQ_LIBRARY_DIRS}
 	${Boost_LIBRARY_DIRS}
 )
 
@@ -96,13 +122,8 @@ link_directories(
 add_executable(Usagi ${cxx-sources})
 
 target_link_libraries(Usagi
-	RFA7_Common100_x64.lib
-	RFA7_Config100_x64.lib
-	RFA7_Logger100_x64.lib
-	RFA7_Data100_x64.lib
-	RFA7_Connections100_x64.lib
-	RFA7_Connections_OMM100_x64.lib
-	RFA7_SessionLayer100_x64.lib
+	${RFA_LIBRARIES}
+	${ZEROMQ_LIBRARIES}
 	${Boost_LIBRARIES}
 	ws2_32.lib
 	dbghelp.lib

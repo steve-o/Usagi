@@ -183,7 +183,7 @@ usagi::rfa_t::VerifyVersion()
  */
 	const auto runtimeVersion = rfa::common::Context::getRFAVersionInfo()->getProductVersion();
 /* Emits compiler warning as RFA_String does not use size_t for sizes. */
-	if (runtimeVersion.substr (0, strlen (RFA_LIBRARY_VERSION)).compareCase (RFA_LIBRARY_VERSION, strlen (RFA_LIBRARY_VERSION))) {
+	if (runtimeVersion.substr (0, (unsigned)strlen (RFA_LIBRARY_VERSION)).compareCase (RFA_LIBRARY_VERSION, (unsigned)strlen (RFA_LIBRARY_VERSION))) {
 // Library is too old for headers.
 		LOG(FATAL)
 		<< "This program requires version " RFA_LIBRARY_VERSION
