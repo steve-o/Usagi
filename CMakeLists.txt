@@ -29,9 +29,8 @@ set(RFA_LIBRARIES
 set(ZEROMQ_ROOT "C:/Program Files/ZeroMQ 2.2.0")
 set(ZEROMQ_INCLUDE_DIRS "${ZEROMQ_ROOT}/include")
 set(ZEROMQ_LIBRARY_DIRS "${ZEROMQ_ROOT}/lib")
-set(ZEROMQ_LIBRARIES
-	libzmq-v100-mt.lib
-)
+set(ZEROMQ_RELEASE_LIBRARIES libzmq-v100-mt.lib)
+set(ZEROMQ_DEBUG_LIBRARIES libzmq-v100-mt-gd.lib)
 
 # Boost headers plus built libraries
 set(BOOST_ROOT D:/boost_1_50_0)
@@ -123,10 +122,13 @@ add_executable(Usagi ${cxx-sources})
 
 target_link_libraries(Usagi
 	${RFA_LIBRARIES}
-	${ZEROMQ_LIBRARIES}
 	${Boost_LIBRARIES}
 	ws2_32.lib
 	dbghelp.lib
+)
+target_link_libraries(Usagi
+	debug ${ZEROMQ_DEBUG_LIBRARIES}
+	optimized ${ZEROMQ_RELEASE_LIBRARIES}
 )
 
 # end of file

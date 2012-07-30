@@ -9,6 +9,9 @@
 
 #include <windows.h>
 
+/* ZeroMQ messaging middleware. */
+#include <zmq.h>
+
 #include "chromium/logging.hh"
 #include "error.hh"
 #include "rfa_logging.hh"
@@ -31,6 +34,61 @@ using rfa::common::RFA_String;
 
 static std::weak_ptr<rfa::common::EventQueue> g_event_queue;
 
+class usagi::worker_t
+{
+public:
+	worker_t (std::shared_ptr<void>& context, unsigned id, std::shared_ptr<provider_t> provider) :
+		context_ (context),
+		id_ (id),
+		provider_ (provider)
+	{
+	}
+
+	void operator()()
+	{
+		zmq_msg_t msg;
+		int rc;
+
+		std::function<int(void*)> zmq_close_deleter = zmq_close;
+/* Socket to receive refresh requests on. */
+		std::shared_ptr<void> receiver;
+		receiver.reset (zmq_socket (context_.get(), ZMQ_PULL), zmq_close_deleter);
+		CHECK((bool)receiver);
+		rc = zmq_bind (receiver.get(), "inproc://usagi/refresh");
+		CHECK(0 == rc);
+/* Also bind for terminating interrupt. */
+		rc = zmq_connect (receiver.get(), "inproc://usagi/abort");
+		CHECK(0 == rc);
+
+		LOG(INFO) << "Thread #" << id_ << ": Accepting refresh requests.";
+
+		while (true) {
+/* Receive new request. */
+			rc = zmq_msg_init (&msg);
+			CHECK(0 == rc);
+			LOG(INFO) << "Thread #" << id_ << ": Awaiting new job.";
+			rc = zmq_recv (receiver.get(), &msg, 0);
+			CHECK(0 == rc);
+			std::string job_text;
+			if (zmq_msg_size (&msg) > 0)
+				job_text.assign (static_cast<char*> (zmq_msg_data (&msg)), zmq_msg_size (&msg));
+			LOG(INFO) << "Thread #" << id_ << ": Received job \"" << job_text << "\"";
+			rc = zmq_msg_close (&msg);
+			CHECK(0 == rc);
+
+			if (0 == job_text.compare ("abort"))
+				break;
+		}
+
+		LOG(INFO) << "Thread #" << id_ << ": Worker closed.";
+	}
+
+protected:
+	const unsigned id_;
+	std::shared_ptr<void> context_;
+	std::shared_ptr<provider_t> provider_;
+};
+
 usagi::usagi_t::~usagi_t()
 {
 	LOG(INFO) << "fin.";
@@ -40,6 +98,17 @@ int
 usagi::usagi_t::run ()
 {
 	LOG(INFO) << config_;
+
+	try {
+/* ZeroMQ context. */
+		std::function<int(void*)> zmq_term_deleter = zmq_term;
+		zmq_context_.reset (zmq_init (0), zmq_term_deleter);
+		CHECK((bool)zmq_context_);
+	} catch (std::exception& e) {
+		LOG(ERROR) << "ZeroMQ::Exception: { "
+			"\"What\": \"" << e.what() << "\" }";
+		goto cleanup;
+	}
 
 	try {
 /* RFA context. */
@@ -61,7 +130,7 @@ usagi::usagi_t::run ()
 			goto cleanup;
 
 /* RFA provider. */
-		provider_.reset (new provider_t (config_, rfa_, event_queue_));
+		provider_.reset (new provider_t (config_, rfa_, event_queue_, zmq_context_));
 		if (!(bool)provider_ || !provider_->init())
 			goto cleanup;
 
@@ -95,15 +164,45 @@ usagi::usagi_t::run ()
 		goto cleanup;
 	}
 
-/* Timer for demo periodic publishing of items.
- */
-	timer_.reset (new time_pump_t<boost::chrono::system_clock> (boost::chrono::system_clock::now(), boost::chrono::seconds (1), this));
-	if (!(bool)timer_)
+	try {
+		std::function<int(void*)> zmq_close_deleter = zmq_close;
+/* Worker abort socket. */
+		abort_sock_.reset (zmq_socket (zmq_context_.get(), ZMQ_PUSH), zmq_close_deleter);
+		CHECK((bool)abort_sock_);
+		int rc = zmq_bind (abort_sock_.get(), "inproc://usagi/abort");
+		CHECK(0 == rc);
+/* Worker threads. */
+		for (size_t i = 0; i < config_.worker_count; ++i) {
+			const unsigned worker_id = (unsigned)(1 + i);
+			LOG(INFO) << "Spawning worker #" << worker_id;
+			auto worker = std::make_shared<worker_t> (zmq_context_, worker_id, provider_);
+			if (!(bool)worker)
+				goto cleanup;
+			auto thread = std::make_shared<boost::thread> (*worker.get());
+			if (!(bool)thread)
+				goto cleanup;
+			workers_.emplace_front (std::make_pair (worker, thread));
+		}
+	} catch (std::exception& e) {
+		LOG(ERROR) << "ZeroMQ::Exception: { "
+			"\"What\": \"" << e.what() << "\" }";
 		goto cleanup;
-	timer_thread_.reset (new boost::thread (*timer_.get()));
-	if (!(bool)timer_thread_)
+	}
+
+	try {
+/* Timer for demo periodic publishing of items. */
+		timer_.reset (new time_pump_t<boost::chrono::system_clock> (boost::chrono::system_clock::now(), boost::chrono::seconds (1), this));
+		if (!(bool)timer_)
+			goto cleanup;
+		timer_thread_.reset (new boost::thread (*timer_.get()));
+		if (!(bool)timer_thread_)
+			goto cleanup;
+		LOG(INFO) << "Added periodic timer, interval " << boost::chrono::seconds (1).count() << " seconds";
+	} catch (std::exception& e) {
+		LOG(ERROR) << "Timer::Exception: { "
+			"\"What\": \"" << e.what() << "\" }";
 		goto cleanup;
-	LOG(INFO) << "Added periodic timer, interval " << boost::chrono::seconds (1).count() << " seconds";
+	}
 
 	LOG(INFO) << "Init complete, entering main loop.";
 	mainLoop ();
@@ -175,6 +274,23 @@ usagi::usagi_t::clear()
 	}	
 	timer_thread_.reset();
 	timer_.reset();
+
+/* Interrupt worker threads. */
+	if (!workers_.empty()) {
+		LOG(INFO) << "Sending interrupt to worker threads.";
+		zmq_msg_t abort_msg;
+		zmq_msg_init_data (&abort_msg, "abort", strlen ("abort"), nullptr, nullptr);
+		zmq_send (abort_sock_.get(), &abort_msg, 0);
+		zmq_msg_close (&abort_msg);
+		LOG(INFO) << "Awaiting worker threads to terminate.";
+		for (auto it = workers_.begin(); it != workers_.end(); ++it) {
+			if ((bool)it->second) it->second->join();
+			it->first.reset();
+		}
+		LOG(INFO) << "All worker threads joined.";
+	}
+	abort_sock_.reset();
+	zmq_context_.reset();
 
 /* Signal message pump thread to exit. */
 	if ((bool)event_queue_)

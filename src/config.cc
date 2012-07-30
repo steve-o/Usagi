@@ -16,7 +16,8 @@ usagi::config_t::config_t() :
 	publisher_name ("PublisherName"),
 	vendor_name ("VendorName"),
 	maximum_data_size (64 * 1024),
-	session_capacity (2)
+	session_capacity (2),
+	worker_count (1)
 {
 /* C++11 initializer lists not supported in MSVC2010 */
 }

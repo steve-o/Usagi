@@ -70,7 +70,7 @@ namespace usagi
 		boost::noncopyable
 	{
 	public:
-		client_t (provider_t& provider);
+		client_t (provider_t& provider, const rfa::common::Handle* handle);
 		~client_t();
 
 		bool getAssociatedMetaInfo();
@@ -78,10 +78,7 @@ namespace usagi
 /* RFA event callback. */
 		void processEvent (const rfa::common::Event& event);
 
-		void setHandle (rfa::common::Handle*const handle) {
-			handle_ = handle;
-			resetPrefix();
-		}
+		bool init (rfa::common::Handle*const handle, std::shared_ptr<void> zmq_context);
 		rfa::common::Handle*const getHandle() const {
 			return handle_;
 		}
@@ -117,8 +114,6 @@ namespace usagi
 
 		uint32_t submit (rfa::common::Msg& msg, rfa::sessionLayer::RequestToken& token, void* closure) throw (rfa::common::InvalidUsageException);
 
-		void resetPrefix();
-
 		provider_t& provider_;
 
 /* unique id per connection. */
@@ -143,9 +138,8 @@ namespace usagi
  */
 		bool is_muted_;
 
-/* Last RespStatus details. */
-		int stream_state_;
-		int data_state_;
+/* RFA request thread client. */
+		std::shared_ptr<void> sender_;
 
 		friend provider_t;
 

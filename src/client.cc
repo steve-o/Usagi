@@ -8,6 +8,9 @@
 
 #include <windows.h>
 
+/* ZeroMQ messaging middleware. */
+#include <zmq.h>
+
 #include "chromium/logging.hh"
 #include "error.hh"
 #include "rfaostream.hh"
@@ -28,7 +31,8 @@ static const int kRdmRdnDisplayId = 2;		/* RDNDISPLAY */
 using rfa::common::RFA_String;
 
 usagi::client_t::client_t (
-	usagi::provider_t& provider
+	usagi::provider_t& provider,
+	const rfa::common::Handle* handle
 	) :
 	creation_time_ (boost::posix_time::second_clock::universal_time()),
 	last_activity_ (creation_time_),
@@ -37,14 +41,15 @@ usagi::client_t::client_t (
 	login_token_ (nullptr),
 	rwf_major_version_ (0),
 	rwf_minor_version_ (0),
-	is_muted_ (true),
-	stream_state_ (0),
-	data_state_ (0)
+	is_muted_ (true)
 {
 	ZeroMemory (cumulative_stats_, sizeof (cumulative_stats_));
 	ZeroMemory (snap_stats_, sizeof (snap_stats_));
 
-	resetPrefix();
+/* Set logger ID */
+	std::ostringstream ss;
+	ss << handle << ':';
+	prefix_.assign (ss.str());
 }
 
 usagi::client_t::~client_t()
@@ -58,13 +63,29 @@ usagi::client_t::~client_t()
 		" }";
 }
 
-/* Set logger ID */
-void
-usagi::client_t::resetPrefix()
+bool
+usagi::client_t::init (
+	rfa::common::Handle*const handle,
+	std::shared_ptr<void> zmq_context
+	)
 {
-	std::ostringstream ss;
-	ss << handle_ << ':';
-	prefix_.assign (ss.str());
+/* save non-const client session handle. */
+	handle_ = handle;
+
+/* create new push socket for submitting refresh requests. */
+	try {
+		std::function<int(void*)> zmq_close_deleter = zmq_close;
+		sender_.reset (zmq_socket (zmq_context.get(), ZMQ_PUSH), zmq_close_deleter);
+		CHECK((bool)sender_);
+		int rc = zmq_connect (sender_.get(), "inproc://usagi/refresh");
+		CHECK(0 == rc);
+	} catch (std::exception& e) {
+		LOG(ERROR) << "ZeroMQ::Exception: { "
+			"\"What\": \"" << e.what() << "\" }";
+		return false;
+	}
+
+	return true;
 }
 
 bool

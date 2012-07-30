@@ -29,7 +29,8 @@ static const RFA_String kEnumTypeDictionaryName ("RWFEnum");
 usagi::provider_t::provider_t (
 	const usagi::config_t& config,
 	std::shared_ptr<usagi::rfa_t> rfa,
-	std::shared_ptr<rfa::common::EventQueue> event_queue
+	std::shared_ptr<rfa::common::EventQueue> event_queue,
+	std::shared_ptr<void> zmq_context
 	) :
 	creation_time_ (boost::posix_time::second_clock::universal_time()),
 	last_activity_ (creation_time_),
@@ -42,10 +43,10 @@ usagi::provider_t::provider_t (
 	service_id_ (0),
 	map_ (false),		/* reference */
 	attribInfo_ (false),	/* reference */
-
 	is_accepting_connections_ (true),
 	is_accepting_requests_ (true),
-	is_muted_ (false)
+	is_muted_ (false),
+	zmq_context_ (zmq_context)
 {
 	ZeroMemory (cumulative_stats_, sizeof (cumulative_stats_));
 	ZeroMemory (snap_stats_, sizeof (snap_stats_));
@@ -59,6 +60,7 @@ usagi::provider_t::~provider_t()
 	{
 		CHECK ((bool)client.second);
 		omm_provider_->unregisterClient (client.first);
+		client.second.reset();
 	});
 	if (nullptr != error_item_handle_)
 		omm_provider_->unregisterClient (error_item_handle_), error_item_handle_ = nullptr;
@@ -322,7 +324,7 @@ usagi::provider_t::acceptClientSession (
 {
 	VLOG(2) << "Accepting new client session request.";
 
-	auto client = std::make_shared<client_t> (*this);
+	auto client = std::make_shared<client_t> (*this, handle);
 	if (!(bool)client)
 		return false;
 
@@ -332,7 +334,8 @@ usagi::provider_t::acceptClientSession (
 	auto registered_handle = omm_provider_->registerClient (event_queue_.get(), &ommClientSessionIntSpec, *static_cast<rfa::common::Client*> (client.get()), nullptr /* closure */);
 	if (nullptr == registered_handle)
 		return false;
-	client->setHandle (registered_handle);
+	if (!client->init (registered_handle, zmq_context_))
+		return false;
 	if (!client->getAssociatedMetaInfo()) {
 		omm_provider_->unregisterClient (registered_handle);
 		return false;

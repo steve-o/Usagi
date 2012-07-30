@@ -15,6 +15,7 @@
 #pragma once
 
 #include <cstdint>
+#include <forward_list>
 
 /* Boost Chrono. */
 #include <boost/chrono.hpp>
@@ -42,6 +43,7 @@ namespace usagi
 {
 	class rfa_t;
 	class provider_t;
+	class worker_t;
 
 /* Basic example structure for application state of an item stream. */
 	class broadcast_stream_t : public item_stream_t
@@ -147,6 +149,13 @@ namespace usagi
 /* Thread timer. */
 		std::unique_ptr<time_pump_t<boost::chrono::system_clock>> timer_;
 		std::unique_ptr<boost::thread> timer_thread_;
+
+/* RFA request thread workers. */
+		std::forward_list<std::pair<std::shared_ptr<worker_t>, std::shared_ptr<boost::thread>>> workers_;
+
+/* thread worker shutdown socket. */
+		std::shared_ptr<void> zmq_context_;
+		std::shared_ptr<void> abort_sock_;
 	};
 
 } /* namespace usagi */

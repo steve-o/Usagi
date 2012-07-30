@@ -61,7 +61,7 @@ namespace usagi
 		boost::noncopyable
 	{
 	public:
-		provider_t (const config_t& config, std::shared_ptr<rfa_t> rfa, std::shared_ptr<rfa::common::EventQueue> event_queue);
+		provider_t (const config_t& config, std::shared_ptr<rfa_t> rfa, std::shared_ptr<rfa::common::EventQueue> event_queue, std::shared_ptr<void> zmq_context);
 		~provider_t();
 
 		bool init() throw (rfa::common::InvalidConfigurationException, rfa::common::InvalidUsageException);
@@ -156,12 +156,11 @@ namespace usagi
 		bool is_accepting_requests_;
 		bool is_muted_;
 
-/* Last RespStatus details. */
-		int stream_state_;
-		int data_state_;
-
 /* Container of all item streams keyed by symbol name. */
 		std::unordered_map<std::string, std::weak_ptr<item_stream_t>> directory_;
+
+/* RFA request thread client. */
+		std::shared_ptr<void> zmq_context_;
 
 /** Performance Counters **/
 		boost::posix_time::ptime creation_time_, last_activity_;

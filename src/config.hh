@@ -50,6 +50,9 @@ namespace usagi
 
 //  Client session capacity.
 		size_t session_capacity;
+
+//  Count of request worker threads.
+		size_t worker_count;
 	};
 
 	inline
@@ -64,8 +67,9 @@ namespace usagi
 			", \"connection_name\": \"" << config.connection_name << "\""
 			", \"publisher_name\": \"" << config.publisher_name << "\""
 			", \"vendor_name\": \"" << config.vendor_name << "\""
-			", \"maximum_data_size\": \"" << config.maximum_data_size << "\""
+			", \"maximum_data_size\": " << config.maximum_data_size <<
 			", \"session_capacity\": " << config.session_capacity << 
+			", \"worker_count\": " << config.worker_count << 
 			" }";
 		return o;
 	}
