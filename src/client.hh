@@ -108,8 +108,6 @@ namespace usagi
 		bool acceptLogin (const rfa::message::ReqMsg& msg, rfa::sessionLayer::RequestToken& login_token);
 		bool sendDirectoryResponse (rfa::sessionLayer::RequestToken& token, const char* service_name, uint32_t filter_mask);
 		bool sendDirectoryResponse();
-/* Item streams whether MMT_MARKET_PRICE or other. */
-		bool sendBlankResponse (rfa::sessionLayer::RequestToken& token, uint32_t service_id, uint8_t model_type, const char* name);
 		bool sendClose (rfa::sessionLayer::RequestToken& token, uint32_t service_id, uint8_t model_type, const char* name, bool use_attribinfo_in_updates, uint8_t status_code);
 
 		uint32_t submit (rfa::common::Msg& msg, rfa::sessionLayer::RequestToken& token, void* closure) throw (rfa::common::InvalidUsageException);

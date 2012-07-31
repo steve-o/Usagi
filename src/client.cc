@@ -15,6 +15,7 @@
 #include "error.hh"
 #include "rfaostream.hh"
 #include "provider.hh"
+#include "provider.pb.h"
 
 /* RDM Usage Guide: Section 6.5: Enterprise Platform
  * For future compatibility, the DictionaryId should be set to 1 by providers.
@@ -561,9 +562,10 @@ usagi::client_t::processItemRequest (
  * a reply.
  */
 	try {
-		const uint32_t service_id = request_msg.getAttribInfo().getServiceID();
-		const uint8_t  model_type = request_msg.getMsgModelType();
-		const char*    item_name  = request_msg.getAttribInfo().getName().c_str();
+		const uint32_t service_id    = request_msg.getAttribInfo().getServiceID();
+		const uint8_t  model_type    = request_msg.getMsgModelType();
+		const char*    item_name     = request_msg.getAttribInfo().getName().c_str();
+		const size_t   item_name_len = request_msg.getAttribInfo().getName().size();
 		const bool use_attribinfo_in_updates = (0 != (request_msg.getIndicationMask() & rfa::message::ReqMsg::AttribInfoInUpdatesFlag));
 
 /* Only accept MMT_MARKET_PRICE. */
@@ -611,7 +613,17 @@ usagi::client_t::processItemRequest (
  * parameters on an already requested stream.
  */
 				LOG(INFO) << prefix_ << "Sending refresh on reissue request.";
-				sendBlankResponse (request_token, service_id, model_type, item_name);
+				provider::Request request;
+				zmq_msg_t msg;
+				request.set_msg_type (provider::Request::MSG_REFRESH);
+				request.mutable_refresh()->set_token ((uintptr_t)&request_token);
+				request.mutable_refresh()->set_service_id (service_id);
+				request.mutable_refresh()->set_model_type (model_type);
+				request.mutable_refresh()->set_item_name (item_name, item_name_len);
+				zmq_msg_init_size (&msg, request.ByteSize());
+				request.SerializeToArray (zmq_msg_data (&msg), (int)zmq_msg_size (&msg));
+				zmq_send (sender_.get(), &msg, 0);
+				zmq_msg_close (&msg);
 			}
 		}
 		else
@@ -651,7 +663,18 @@ usagi::client_t::processItemRequest (
 				items_.emplace (std::make_pair (&request_token, stream));
 				stream->clients.emplace (std::make_pair (&request_token, 
 									 std::make_pair (shared_from_this(), use_attribinfo_in_updates)));
-				sendBlankResponse (request_token, service_id, model_type, item_name);
+/* forward request to worker pool */
+				provider::Request request;
+				zmq_msg_t msg;
+				request.set_msg_type (provider::Request::MSG_REFRESH);
+				request.mutable_refresh()->set_token ((uintptr_t)&request_token);
+				request.mutable_refresh()->set_service_id (service_id);
+				request.mutable_refresh()->set_model_type (model_type);
+				request.mutable_refresh()->set_item_name (item_name, item_name_len);
+				zmq_msg_init_size (&msg, request.ByteSize());
+				request.SerializeToArray (zmq_msg_data (&msg), (int)zmq_msg_size (&msg));
+				zmq_send (sender_.get(), &msg, 0);
+				zmq_msg_close (&msg);
 			}
 		}
 /* ignore any error */
@@ -745,83 +768,6 @@ usagi::client_t::sendDirectoryResponse (
 /* Create and throw away first token for MMT_DIRECTORY. */
 	submit (static_cast<rfa::common::Msg&> (response), request_token, nullptr);
 	cumulative_stats_[CLIENT_PC_MMT_DIRECTORY_SENT]++;
-	return true;
-}
-
-/* Refresh initial image.
- */
-bool
-usagi::client_t::sendBlankResponse (
-	rfa::sessionLayer::RequestToken& request_token,
-	uint32_t service_id,
-	uint8_t model_type,
-	const char* name_c
-	)
-{
-	VLOG(2) << prefix_ << "Sending blank response { "
-		  "\"RequestToken\": \"" << (intptr_t)&request_token << "\""
-		", \"ServiceID\": " << service_id <<
-		", \"MsgModelType\": " << (int)model_type <<
-		", \"Name\": \"" << name_c << "\""
-		" }";
-/* 7.5.9.1 Create a response message (4.2.2) */
-	rfa::message::RespMsg response (false);	/* reference */
-
-/* 7.5.9.2 Set the message model type of the response. */
-	response.setMsgModelType (model_type);
-/* 7.5.9.3 Set response type. */
-	response.setRespType (rfa::message::RespMsg::RefreshEnum);
-	response.setIndicationMask (rfa::message::RespMsg::RefreshCompleteFlag);
-
-/* 7.5.9.5 Create or re-use a request attribute object (4.2.4) */
-	rfa::message::AttribInfo attribInfo;
-	attribInfo.setNameType (rfa::rdm::INSTRUMENT_NAME_RIC);
-	RFA_String name (name_c, 0, false);	/* reference */
-	attribInfo.setServiceID (service_id);
-	attribInfo.setName (name);
-	response.setAttribInfo (attribInfo);
-
-/* 4.3.1 RespMsg.Payload */
-// not std::map :(  derived from rfa::common::Data
-	rfa::data::FieldList fields;
-	fields.setAssociatedMetaInfo (getRwfMajorVersion(), getRwfMinorVersion());
-	fields.setInfo (kDictionaryId, kFieldListId);
-/* Set a reference to field list, not a copy */
-	response.setPayload (fields);
-
-	rfa::common::RespStatus status;
-/* Item interaction state: Open, Closed, ClosedRecover, Redirected, NonStreaming, or Unspecified. */
-	status.setStreamState (rfa::common::RespStatus::OpenEnum);
-/* Data quality state: Ok, Suspect, or Unspecified. */
-	status.setDataState (rfa::common::RespStatus::OkEnum);
-/* Error code, e.g. NotFound, InvalidArgument, ... */
-	status.setStatusCode (rfa::common::RespStatus::NoneEnum);
-	response.setRespStatus (status);
-
-#ifdef DEBUG
-/* 4.2.8 Message Validation.  RFA provides an interface to verify that
- * constructed messages of these types conform to the Reuters Domain
- * Models as specified in RFA API 7 RDM Usage Guide.
- */
-	uint8_t validation_status = rfa::message::MsgValidationError;
-	try {
-		RFA_String warningText;
-		validation_status = response.validateMsg (&warningText);
-		cumulative_stats_[CLIENT_PC_ITEM_VALIDATED]++;
-		if (rfa::message::MsgValidationWarning == validation_status)
-			LOG(ERROR) << prefix_ << "validateMsg: { \"warningText\": \"" << warningText << "\" }";
-	} catch (rfa::common::InvalidUsageException& e) {
-		cumulative_stats_[CLIENT_PC_ITEM_MALFORMED]++;
-		LOG(ERROR) << prefix_ <<
-			"InvalidUsageException: { " <<
-			   "\"StatusText\": \"" << e.getStatus().getStatusText() << "\""
-			", " << response <<
-			" }";
-	}
-#endif
-
-	submit (static_cast<rfa::common::Msg&> (response), request_token, nullptr);
-	cumulative_stats_[CLIENT_PC_ITEM_SENT]++;
 	return true;
 }
 

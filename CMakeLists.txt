@@ -29,8 +29,14 @@ set(RFA_LIBRARIES
 set(ZEROMQ_ROOT "C:/Program Files/ZeroMQ 2.2.0")
 set(ZEROMQ_INCLUDE_DIRS "${ZEROMQ_ROOT}/include")
 set(ZEROMQ_LIBRARY_DIRS "${ZEROMQ_ROOT}/lib")
-set(ZEROMQ_RELEASE_LIBRARIES libzmq-v100-mt.lib)
-set(ZEROMQ_DEBUG_LIBRARIES libzmq-v100-mt-gd.lib)
+set(ZEROMQ_LIBRARIES
+	optimized libzmq-v100-mt.lib
+	debug libzmq-v100-mt-gd.lib
+)
+
+# Google Protocol BUffers
+set(PROTOBUF_SRC_ROOT_FOLDER "D:/protobuf-2.4.1")
+find_package (Protobuf REQUIRED)
 
 # Boost headers plus built libraries
 set(BOOST_ROOT D:/boost_1_50_0)
@@ -77,6 +83,11 @@ add_definitions(
 )
 
 #-----------------------------------------------------------------------------
+# Generated source files
+
+PROTOBUF_GENERATE_CPP(PROTO_SRCS PROTO_HDRS src/provider.proto)
+
+#-----------------------------------------------------------------------------
 # source files
 
 set(cxx-sources
@@ -104,8 +115,10 @@ set(cxx-sources
 
 include_directories(
 	include
+	${CMAKE_CURRENT_BINARY_DIR}
 	${RFA_INCLUDE_DIRS}
 	${ZEROMQ_INCLUDE_DIRS}
+	${PROTOBUF_INCLUDE_DIRS}
 	${Boost_INCLUDE_DIRS}
 )
 
@@ -118,17 +131,15 @@ link_directories(
 #-----------------------------------------------------------------------------
 # output
 
-add_executable(Usagi ${cxx-sources})
+add_executable(Usagi ${cxx-sources} ${PROTO_SRCS} ${PROTO_HDRS})
 
 target_link_libraries(Usagi
 	${RFA_LIBRARIES}
 	${Boost_LIBRARIES}
+	${ZEROMQ_LIBRARIES}
+	${PROTOBUF_LIBRARIES}
 	ws2_32.lib
 	dbghelp.lib
-)
-target_link_libraries(Usagi
-	debug ${ZEROMQ_DEBUG_LIBRARIES}
-	optimized ${ZEROMQ_RELEASE_LIBRARIES}
 )
 
 # end of file

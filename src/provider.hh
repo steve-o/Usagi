@@ -68,6 +68,7 @@ namespace usagi
 
 		bool createItemStream (const char* name, std::shared_ptr<item_stream_t> item_stream) throw (rfa::common::InvalidUsageException);
 		bool send (item_stream_t& item_stream, rfa::message::RespMsg& msg, const rfa::message::AttribInfo& attribInfo) throw (rfa::common::InvalidUsageException);
+		bool send (rfa::message::RespMsg& msg, rfa::sessionLayer::RequestToken& token) throw (rfa::common::InvalidUsageException);
 
 /* RFA event callback. */
 		void processEvent (const rfa::common::Event& event) override;

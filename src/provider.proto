@@ -1,0 +1,15 @@
+package provider;
+
+message Request {
+	enum MsgType {
+		MSG_ABORT = 0;
+		MSG_REFRESH = 1;
+	}
+	required MsgType msg_type = 1;
+	optional group Refresh = 2 {
+		required uint64 token = 3;
+		required uint32 service_id = 4;
+		required uint32 model_type = 5;
+		required string item_name = 6;
+	}
+}

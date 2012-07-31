@@ -16,6 +16,7 @@
 #include "error.hh"
 #include "rfa_logging.hh"
 #include "rfaostream.hh"
+#include "provider.pb.h"
 
 /* RDM Usage Guide: Section 6.5: Enterprise Platform
  * For future compatibility, the DictionaryId should be set to 1 by providers.
@@ -37,15 +38,16 @@ static std::weak_ptr<rfa::common::EventQueue> g_event_queue;
 class usagi::worker_t
 {
 public:
-	worker_t (std::shared_ptr<void>& context, unsigned id, std::shared_ptr<provider_t> provider) :
+	worker_t (usagi_t& usagi, std::shared_ptr<void>& context, unsigned id) :
+		usagi_ (usagi),
 		context_ (context),
-		id_ (id),
-		provider_ (provider)
+		id_ (id)
 	{
 	}
 
 	void operator()()
 	{
+		provider::Request request;
 		zmq_msg_t msg;
 		int rc;
 
@@ -69,15 +71,33 @@ public:
 			LOG(INFO) << "Thread #" << id_ << ": Awaiting new job.";
 			rc = zmq_recv (receiver.get(), &msg, 0);
 			CHECK(0 == rc);
-			std::string job_text;
-			if (zmq_msg_size (&msg) > 0)
-				job_text.assign (static_cast<char*> (zmq_msg_data (&msg)), zmq_msg_size (&msg));
-			LOG(INFO) << "Thread #" << id_ << ": Received job \"" << job_text << "\"";
+			if (!request.ParseFromArray (zmq_msg_data (&msg), (int)zmq_msg_size (&msg))) {
+				LOG(ERROR) << "Thread #" << id_ << ": Received invalid request.";
+				rc = zmq_msg_close (&msg);
+				CHECK(0 == rc);
+				continue;
+			}
+			if (request.msg_type() == provider::Request::MSG_ABORT) {
+				LOG(ERROR) << "Thread #" << id_ << ": Received interrupt request.";
+				break;
+			}
+			if (!(request.msg_type() == provider::Request::MSG_REFRESH
+				&& request.has_refresh()))
+			{
+				LOG(ERROR) << "Thread #" << id_ << ": Received unknown request.";
+				continue;
+			}
+			LOG(INFO) << "Thread #" << id_ << ": Received request \"" << request.refresh().item_name() << "\"";
+			LOG(INFO) << request.DebugString();
 			rc = zmq_msg_close (&msg);
 			CHECK(0 == rc);
 
-			if (0 == job_text.compare ("abort"))
-				break;
+/* forward to main application */
+			rfa::sessionLayer::RequestToken* request_token = reinterpret_cast<rfa::sessionLayer::RequestToken*> ((uintptr_t)request.refresh().token());
+			const uint32_t service_id = request.refresh().service_id();
+			const uint8_t model_type = request.refresh().model_type();
+			const char* name_c = request.refresh().item_name().c_str();
+			usagi_.processRefreshRequest (*request_token, service_id, model_type, name_c);
 		}
 
 		LOG(INFO) << "Thread #" << id_ << ": Worker closed.";
@@ -86,7 +106,7 @@ public:
 protected:
 	const unsigned id_;
 	std::shared_ptr<void> context_;
-	std::shared_ptr<provider_t> provider_;
+	usagi_t& usagi_;
 };
 
 usagi::usagi_t::~usagi_t()
@@ -175,7 +195,7 @@ usagi::usagi_t::run ()
 		for (size_t i = 0; i < config_.worker_count; ++i) {
 			const unsigned worker_id = (unsigned)(1 + i);
 			LOG(INFO) << "Spawning worker #" << worker_id;
-			auto worker = std::make_shared<worker_t> (zmq_context_, worker_id, provider_);
+			auto worker = std::make_shared<worker_t> (*this, zmq_context_, worker_id);
 			if (!(bool)worker)
 				goto cleanup;
 			auto thread = std::make_shared<boost::thread> (*worker.get());
@@ -278,10 +298,13 @@ usagi::usagi_t::clear()
 /* Interrupt worker threads. */
 	if (!workers_.empty()) {
 		LOG(INFO) << "Sending interrupt to worker threads.";
-		zmq_msg_t abort_msg;
-		zmq_msg_init_data (&abort_msg, "abort", strlen ("abort"), nullptr, nullptr);
-		zmq_send (abort_sock_.get(), &abort_msg, 0);
-		zmq_msg_close (&abort_msg);
+		provider::Request request;
+		request.set_msg_type (provider::Request::MSG_ABORT);
+		zmq_msg_t msg;
+		zmq_msg_init_size (&msg, request.ByteSize());
+		request.SerializeToArray (zmq_msg_data (&msg), (int)zmq_msg_size (&msg));
+		zmq_send (abort_sock_.get(), &msg, 0);
+		zmq_msg_close (&msg);
 		LOG(INFO) << "Awaiting worker threads to terminate.";
 		for (auto it = workers_.begin(); it != workers_.end(); ++it) {
 			if ((bool)it->second) it->second->join();
@@ -337,6 +360,78 @@ usagi::usagi_t::processTimer (
 	}
 /* continue raising timer events */
 	return true;
+}
+
+/* Refresh request entry point. */
+void
+usagi::usagi_t::processRefreshRequest (
+	rfa::sessionLayer::RequestToken& request_token,
+	uint32_t service_id,
+	uint8_t model_type,
+	const char* name_c
+	)
+{
+	VLOG(2) << "Sending blank response to incoming refresh request: { "
+		  "\"RequestToken\": \"" << (intptr_t)&request_token << "\""
+		", \"ServiceID\": " << service_id <<
+		", \"MsgModelType\": " << (int)model_type <<
+		", \"Name\": \"" << name_c << "\""
+		" }";
+/* 7.5.9.1 Create a response message (4.2.2) */
+	rfa::message::RespMsg response (false);	/* reference */
+
+/* 7.5.9.2 Set the message model type of the response. */
+	response.setMsgModelType (model_type);
+/* 7.5.9.3 Set response type. */
+	response.setRespType (rfa::message::RespMsg::RefreshEnum);
+	response.setIndicationMask (rfa::message::RespMsg::RefreshCompleteFlag);
+
+/* 7.5.9.5 Create or re-use a request attribute object (4.2.4) */
+	attribInfo_.clear();
+	attribInfo_.setNameType (rfa::rdm::INSTRUMENT_NAME_RIC);
+	RFA_String name (name_c, 0, false);	/* reference */
+	attribInfo_.setServiceID (service_id);
+	attribInfo_.setName (name);
+	response.setAttribInfo (attribInfo_);
+
+/* 4.3.1 RespMsg.Payload */
+// not std::map :(  derived from rfa::common::Data
+	fields_.setAssociatedMetaInfo (provider_->getRwfMajorVersion(), provider_->getRwfMinorVersion());
+	fields_.setInfo (kDictionaryId, kFieldListId);
+/* Set a reference to field list, not a copy */
+	response.setPayload (fields_);
+
+	rfa::common::RespStatus status;
+/* Item interaction state: Open, Closed, ClosedRecover, Redirected, NonStreaming, or Unspecified. */
+	status.setStreamState (rfa::common::RespStatus::OpenEnum);
+/* Data quality state: Ok, Suspect, or Unspecified. */
+	status.setDataState (rfa::common::RespStatus::OkEnum);
+/* Error code, e.g. NotFound, InvalidArgument, ... */
+	status.setStatusCode (rfa::common::RespStatus::NoneEnum);
+	response.setRespStatus (status);
+
+#ifdef DEBUG
+/* 4.2.8 Message Validation.  RFA provides an interface to verify that
+ * constructed messages of these types conform to the Reuters Domain
+ * Models as specified in RFA API 7 RDM Usage Guide.
+ */
+	uint8_t validation_status = rfa::message::MsgValidationError;
+	try {
+		RFA_String warningText;
+		validation_status = response.validateMsg (&warningText);
+		if (rfa::message::MsgValidationWarning == validation_status)
+			LOG(ERROR) << prefix_ << "validateMsg: { \"warningText\": \"" << warningText << "\" }";
+	} catch (rfa::common::InvalidUsageException& e) {
+		LOG(ERROR) << prefix_ <<
+			"InvalidUsageException: { " <<
+			   "\"StatusText\": \"" << e.getStatus().getStatusText() << "\""
+			", " << response <<
+			" }";
+	}
+#endif
+
+	provider_->send (response, request_token);
+	LOG(INFO) << "Sent refresh.";
 }
 
 bool

@@ -199,6 +199,20 @@ usagi::provider_t::send (
 	return true;
 }
 
+/* Send an Rfa initial image to a single client.
+ */
+bool
+usagi::provider_t::send (
+	rfa::message::RespMsg& msg,
+	rfa::sessionLayer::RequestToken& token
+	)
+{
+	send (static_cast<rfa::common::Msg&> (msg), token, nullptr);
+	cumulative_stats_[PROVIDER_PC_MSGS_SENT]++;
+	last_activity_ = boost::posix_time::second_clock::universal_time();
+	return true;
+}
+
 uint32_t
 usagi::provider_t::send (
 	rfa::common::Msg& msg,

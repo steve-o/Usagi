@@ -10,6 +10,8 @@
 
 #pragma comment (lib, "winmm")
 
+#include <google/protobuf/stubs/common.h>
+
 #include "chromium/command_line.hh"
 #include "chromium/logging.hh"
 
@@ -80,6 +82,10 @@ main (
 /* Suppress abort message. */
 	_set_abort_behavior (0, ~0);
 #endif
+
+// Verify that the version of the library that we linked against is
+// compatible with the version of the headers we compiled against.
+	GOOGLE_PROTOBUF_VERIFY_VERSION;
 
 	env_t env (argc, argv);
 	timecaps_t timecaps (1 /* ms */);

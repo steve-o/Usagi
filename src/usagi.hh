@@ -16,6 +16,7 @@
 
 #include <cstdint>
 #include <forward_list>
+#include <memory>
 
 /* Boost Chrono. */
 #include <boost/chrono.hpp>
@@ -97,8 +98,17 @@ namespace usagi
 		time_base_t<Clock, Duration>* cb_;
 	};
 
+/* Client request event source */
+	class request_base_t
+	{
+	public:
+		virtual void processRefreshRequest (rfa::sessionLayer::RequestToken& token, uint32_t service_id, uint8_t model_type, const char* name) = 0;
+	};
+
 	class usagi_t :
+		public std::enable_shared_from_this<usagi_t>,
 		public time_base_t<boost::chrono::system_clock>,
+		public request_base_t,
 		boost::noncopyable
 	{
 	public:
@@ -112,6 +122,9 @@ namespace usagi
 
 /* Configured period timer entry point. */
 		bool processTimer (const boost::chrono::time_point<boost::chrono::system_clock>& t) override;
+
+/* Refresh request entry point. */
+		void processRefreshRequest (rfa::sessionLayer::RequestToken& token, uint32_t service_id, uint8_t model_type, const char* name) override;
 
 	private:
 
