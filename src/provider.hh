@@ -10,11 +10,17 @@
 #include <unordered_map>
 #include <utility>
 
+/* Boost Atomics */
+#include <boost/atomic.hpp>
+
 /* Boost Posix Time */
 #include <boost/date_time/posix_time/posix_time.hpp>
 
 /* Boost noncopyable base class */
 #include <boost/utility.hpp>
+
+/* Boost threading. */
+#include <boost/thread.hpp>
 
 /* RFA 7.2 */
 #include <rfa/rfa.hh>
@@ -54,6 +60,7 @@ namespace usagi
 /* Request tokens for clients, can be more than one per client. */
 		std::unordered_map<rfa::sessionLayer::RequestToken*, 
 				   std::pair<std::shared_ptr<client_t>, bool>> clients;
+		boost::shared_mutex lock;
 	};
 
 	class provider_t :
@@ -73,11 +80,8 @@ namespace usagi
 /* RFA event callback. */
 		void processEvent (const rfa::common::Event& event) override;
 
-		uint8_t getRwfMajorVersion() const {
-			return min_rwf_major_version_;
-		}
-		uint8_t getRwfMinorVersion() const {
-			return min_rwf_minor_version_;
+		uint16_t getRwfVersion() const {
+			return min_rwf_version_.load();
 		}
 		const char* getServiceName() const {
 			return config_.service_name.c_str();
@@ -107,7 +111,7 @@ namespace usagi
 		uint32_t submit (rfa::common::Msg& msg, rfa::sessionLayer::RequestToken& token, void* closure) throw (rfa::common::InvalidUsageException);
 
 		void setServiceId (uint32_t service_id) {
-			service_id_ = service_id;
+			service_id_.store (service_id);
 		}
 
 		const config_t& config_;
@@ -133,15 +137,15 @@ namespace usagi
 
 /* RFA Client Session directory */
 		std::unordered_map<rfa::common::Handle*const, std::shared_ptr<client_t>> clients_;
+		boost::shared_mutex clients_lock_;
 
 		friend client_t;
 
 /* Reuters Wire Format versions. */
-		uint8_t min_rwf_major_version_;
-		uint8_t min_rwf_minor_version_;
+		boost::atomic_uint16_t min_rwf_version_;
 
 /* Directory mapped ServiceID */
-		uint32_t service_id_;
+		boost::atomic_uint32_t service_id_;
 
 /* Pre-allocated shared resource. */
 		rfa::data::Map map_;
@@ -159,6 +163,7 @@ namespace usagi
 
 /* Container of all item streams keyed by symbol name. */
 		std::unordered_map<std::string, std::weak_ptr<item_stream_t>> directory_;
+		boost::shared_mutex directory_lock_;
 
 /* RFA request thread client. */
 		std::shared_ptr<void> zmq_context_;

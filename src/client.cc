@@ -593,8 +593,10 @@ usagi::client_t::processItemRequest (
 				auto sp = it->second.lock();
 				if ((bool)sp) {
 					auto stream = sp.get();
+					boost::upgrade_lock<boost::shared_mutex> lock (stream->lock);
 					auto it = stream->clients.find (&request_token);
 					DCHECK (it != stream->clients.end());
+					boost::upgrade_to_unique_lock<boost::shared_mutex> uniqueLock (lock);
 					stream->clients.erase (it);
 				}
 /* remove from client item list. */
@@ -651,6 +653,7 @@ usagi::client_t::processItemRequest (
 			else
 			{
 /* check for item in inventory */
+				boost::shared_lock<boost::shared_mutex> directory_lock (provider_.directory_lock_);
 				auto it = provider_.directory_.find (item_name);
 				if (it == provider_.directory_.end()) {
 					LOG(INFO) << prefix_ << "Closing request for item not found in directory.";
@@ -661,6 +664,7 @@ usagi::client_t::processItemRequest (
 				auto stream = it->second.lock();
 				DCHECK ((bool)stream);
 				items_.emplace (std::make_pair (&request_token, stream));
+				boost::unique_lock<boost::shared_mutex> stream_lock (stream->lock);
 				stream->clients.emplace (std::make_pair (&request_token, 
 									 std::make_pair (shared_from_this(), use_attribinfo_in_updates)));
 /* forward request to worker pool */
@@ -710,8 +714,10 @@ usagi::client_t::processOMMInactiveClientSessionEvent (
 			auto sp = item.second.lock();
 			if (!(bool)sp)
 				return;
+			boost::upgrade_lock<boost::shared_mutex> lock (sp->lock);
 			auto it = sp->clients.find (item.first);
 			DCHECK(sp->clients.end() != it);
+			boost::upgrade_to_unique_lock<boost::shared_mutex> uniqueLock (lock);
 			sp->clients.erase (it);
 			VLOG(2) << prefix_ << sp->rfa_name;
 		});

@@ -44,6 +44,12 @@ set(BOOST_LIBRARYDIR ${BOOST_ROOT}/stage/lib)
 set(Boost_USE_STATIC_LIBS ON)
 find_package (Boost 1.50 COMPONENTS chrono thread REQUIRED)
 
+# Boost Atomics
+set(Boost_INCLUDE_DIRS
+	"D:/boost.atomic"
+	${Boost_INCLUDE_DIRS}
+)
+
 #-----------------------------------------------------------------------------
 # force off-tree build
 

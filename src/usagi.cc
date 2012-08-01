@@ -396,8 +396,22 @@ usagi::usagi_t::processRefreshRequest (
 
 /* 4.3.1 RespMsg.Payload */
 // not std::map :(  derived from rfa::common::Data
-	fields_.setAssociatedMetaInfo (provider_->getRwfMajorVersion(), provider_->getRwfMinorVersion());
+	const uint16_t rwf_version = provider_->getRwfVersion();
+	fields_.setAssociatedMetaInfo (rwf_version / 256, rwf_version % 256);
 	fields_.setInfo (kDictionaryId, kFieldListId);
+
+/* Clear required for SingleWriteIterator state machine. */
+	auto& it = single_write_it_;
+	DCHECK (it.isInitialized());
+	it.clear();
+	it.start (fields_);
+
+	rfa::data::FieldEntry field (false);
+	field.setFieldID (kRdmRdnDisplayId);
+	it.bind (field);
+	it.setUInt (100);
+
+	it.complete();
 /* Set a reference to field list, not a copy */
 	response.setPayload (fields_);
 
@@ -455,7 +469,8 @@ usagi::usagi_t::sendRefresh()
 
 /* 4.3.1 RespMsg.Payload */
 // not std::map :(  derived from rfa::common::Data
-	fields_.setAssociatedMetaInfo (provider_->getRwfMajorVersion(), provider_->getRwfMinorVersion());
+	const uint16_t rwf_version = provider_->getRwfVersion();
+	fields_.setAssociatedMetaInfo (rwf_version / 256, rwf_version % 256);
 	fields_.setInfo (kDictionaryId, kFieldListId);
 
 /* Clear required for SingleWriteIterator state machine. */
@@ -465,11 +480,6 @@ usagi::usagi_t::sendRefresh()
 	it.start (fields_);
 
 	rfa::data::FieldEntry field (false);
-
-	field.setFieldID (kRdmRdnDisplayId);
-	it.bind (field);
-	it.setUInt (100);
-
 	field.setFieldID (kRdmTradePriceId);
 	it.bind (field);
 	it.setReal (++msft_stream_->count, rfa::data::Exponent0);

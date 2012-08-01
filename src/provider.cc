@@ -38,8 +38,7 @@ usagi::provider_t::provider_t (
 	rfa_ (rfa),
 	event_queue_ (event_queue),
 	error_item_handle_ (nullptr),
-	min_rwf_major_version_ (0),
-	min_rwf_minor_version_ (0),
+	min_rwf_version_ (0),
 	service_id_ (0),
 	map_ (false),		/* reference */
 	attribInfo_ (false),	/* reference */
@@ -149,6 +148,7 @@ usagi::provider_t::createItemStream (
 	item_stream->rfa_name.set (name, 0, true);
 /* no tokens until subscription appears. */
 	const std::string key (name);
+	boost::unique_lock<boost::shared_mutex> lock (directory_lock_);
 	auto status = directory_.emplace (std::make_pair (key, item_stream));
 	assert (true == status.second);
 	assert (directory_.end() != directory_.find (key));
@@ -162,14 +162,15 @@ usagi::provider_t::createItemStream (
 
 bool
 usagi::provider_t::send (
-	item_stream_t& item_stream,
+	item_stream_t& stream,
 	rfa::message::RespMsg& msg,
 	const rfa::message::AttribInfo& attribInfo
 )
 {
 	unsigned i = 0;
+	boost::shared_lock<boost::shared_mutex> stream_lock (stream.lock);
 /* first iteration without AttribInfo */
-	std::for_each (item_stream.clients.begin(), item_stream.clients.end(),
+	std::for_each (stream.clients.begin(), stream.clients.end(),
 		[&](const std::pair<rfa::sessionLayer::RequestToken*,
 				    std::pair<std::shared_ptr<client_t>, bool>>& client)
 	{
@@ -180,10 +181,10 @@ usagi::provider_t::send (
 		++i;
 	});
 /* second iteration with AttribInfo */
-	if (i < item_stream.clients.size())
+	if (i < stream.clients.size())
 	{
 		msg.setAttribInfo (attribInfo);
-		std::for_each (item_stream.clients.begin(), item_stream.clients.end(),
+		std::for_each (stream.clients.begin(), stream.clients.end(),
 			[&](const std::pair<rfa::sessionLayer::RequestToken*,
 					    std::pair<std::shared_ptr<client_t>, bool>>& client)
 		{
@@ -356,27 +357,25 @@ usagi::provider_t::acceptClientSession (
 	}
 
 /* Determine lowest common Reuters Wire Format (RWF) version */
-	if (0 == min_rwf_major_version_ &&
-	    0 == min_rwf_minor_version_)
+	const uint16_t client_rwf_version = (client->getRwfMajorVersion() * 256) + client->getRwfMinorVersion();
+	if (0 == min_rwf_version_)
 	{
 		LOG(INFO) << "Setting RWF: { "
 				  "\"MajorVersion\": " << (unsigned)client->getRwfMajorVersion() <<
 				", \"MinorVersion\": " << (unsigned)client->getRwfMinorVersion() <<
 				" }";
-		min_rwf_major_version_ = client->getRwfMajorVersion();
-		min_rwf_minor_version_ = client->getRwfMinorVersion();
+		min_rwf_version_.store (client_rwf_version);
 	}
-	if (((min_rwf_major_version_ == client->getRwfMajorVersion() && min_rwf_minor_version_ > client->getRwfMinorVersion()) ||
-	     (min_rwf_major_version_ > client->getRwfMajorVersion())))
+	else if (min_rwf_version_ > client_rwf_version)
 	{
 		LOG(INFO) << "Degrading RWF: { "
 				  "\"MajorVersion\": " << (unsigned)client->getRwfMajorVersion() <<
 				", \"MinorVersion\": " << (unsigned)client->getRwfMinorVersion() <<
 				" }";
-		min_rwf_major_version_ = client->getRwfMajorVersion();
-		min_rwf_minor_version_ = client->getRwfMinorVersion();
+		min_rwf_version_.store (client_rwf_version);
 	}
 
+	boost::unique_lock<boost::shared_mutex> lock (clients_lock_);
 	clients_.emplace (std::make_pair (registered_handle, client));
 	cumulative_stats_[PROVIDER_PC_CLIENT_SESSION_ACCEPTED]++;
 	return true;
@@ -390,9 +389,11 @@ usagi::provider_t::eraseClientSession (
 /* unregister RFA client session. */
 	omm_provider_->unregisterClient (handle);
 /* remove client from directory. */
+	boost::upgrade_lock<boost::shared_mutex> lock (clients_lock_);
 	auto it = clients_.find (handle);
 	if (clients_.end() == it)
 		return false;
+	boost::upgrade_to_unique_lock<boost::shared_mutex> uniqueLock (lock);
 	clients_.erase (it);
 	return true;
 }
