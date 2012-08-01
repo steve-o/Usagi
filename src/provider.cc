@@ -170,28 +170,30 @@ usagi::provider_t::send (
 	unsigned i = 0;
 	boost::shared_lock<boost::shared_mutex> stream_lock (stream.lock);
 /* first iteration without AttribInfo */
-	std::for_each (stream.clients.begin(), stream.clients.end(),
-		[&](const std::pair<rfa::sessionLayer::RequestToken*,
-				    std::pair<std::shared_ptr<client_t>, bool>>& client)
+	std::for_each (stream.requests.begin(), stream.requests.end(),
+		[&](std::pair<rfa::sessionLayer::RequestToken*const, std::shared_ptr<request_t>>& request)
 	{
-		if (client.second.second)
+		if (request.second->is_muted || request.second->use_attribinfo_in_updates)
 			return;
-		send (static_cast<rfa::common::Msg&> (msg), *(client.first), nullptr);
-		client.second.first->cumulative_stats_[CLIENT_PC_RFA_MSGS_SENT]++;
+		send (static_cast<rfa::common::Msg&> (msg), *(request.first), nullptr);
+		auto sp = request.second->client.lock();
+		if ((bool)sp)
+			sp->cumulative_stats_[CLIENT_PC_RFA_MSGS_SENT]++;
 		++i;
 	});
 /* second iteration with AttribInfo */
-	if (i < stream.clients.size())
+	if (i < stream.requests.size())
 	{
 		msg.setAttribInfo (attribInfo);
-		std::for_each (stream.clients.begin(), stream.clients.end(),
-			[&](const std::pair<rfa::sessionLayer::RequestToken*,
-					    std::pair<std::shared_ptr<client_t>, bool>>& client)
+		std::for_each (stream.requests.begin(), stream.requests.end(),
+		[&](std::pair<rfa::sessionLayer::RequestToken*const, std::shared_ptr<request_t>>& request)
 		{
-			if (!client.second.second)
+			if (request.second->is_muted || !request.second->use_attribinfo_in_updates)
 				return;
-			send (static_cast<rfa::common::Msg&> (msg), *(client.first), nullptr);
-			client.second.first->cumulative_stats_[CLIENT_PC_RFA_MSGS_SENT]++;
+			send (static_cast<rfa::common::Msg&> (msg), *(request.first), nullptr);
+			auto sp = request.second->client.lock();
+			if ((bool)sp)
+				sp->cumulative_stats_[CLIENT_PC_RFA_MSGS_SENT]++;
 			++i;
 		});
 	}
@@ -208,9 +210,25 @@ usagi::provider_t::send (
 	rfa::sessionLayer::RequestToken& token
 	)
 {
+/* find iteam stream for the token */
+	auto it = requests_.find (&token);
+	if (requests_.end() == it)
+		return false;
+	auto request = it->second.lock();
+	if (!(bool)request)
+		return false;
+	auto stream = request->item_stream.lock();
+	if (!(bool)stream)
+		return false;
+/* lock updates for this stream */
+	boost::unique_lock<boost::shared_mutex> lock (stream->lock);
+/* forward refresh image */
 	send (static_cast<rfa::common::Msg&> (msg), token, nullptr);
 	cumulative_stats_[PROVIDER_PC_MSGS_SENT]++;
 	last_activity_ = boost::posix_time::second_clock::universal_time();
+/* enable updates for this request */
+	request->is_muted = false;
+/* unlock */
 	return true;
 }
 

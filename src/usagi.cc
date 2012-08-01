@@ -384,7 +384,7 @@ usagi::usagi_t::processRefreshRequest (
 	response.setMsgModelType (model_type);
 /* 7.5.9.3 Set response type. */
 	response.setRespType (rfa::message::RespMsg::RefreshEnum);
-	response.setIndicationMask (rfa::message::RespMsg::RefreshCompleteFlag);
+	response.setIndicationMask (rfa::message::RespMsg::RefreshCompleteFlag | rfa::message::RespMsg::DoNotRippleFlag);
 
 /* 7.5.9.5 Create or re-use a request attribute object (4.2.4) */
 	attribInfo_.clear();
@@ -415,6 +415,7 @@ usagi::usagi_t::processRefreshRequest (
 /* Set a reference to field list, not a copy */
 	response.setPayload (fields_);
 
+#if 0
 	rfa::common::RespStatus status;
 /* Item interaction state: Open, Closed, ClosedRecover, Redirected, NonStreaming, or Unspecified. */
 	status.setStreamState (rfa::common::RespStatus::OpenEnum);
@@ -423,6 +424,7 @@ usagi::usagi_t::processRefreshRequest (
 /* Error code, e.g. NotFound, InvalidArgument, ... */
 	status.setStatusCode (rfa::common::RespStatus::NoneEnum);
 	response.setRespStatus (status);
+#endif
 
 #ifdef DEBUG
 /* 4.2.8 Message Validation.  RFA provides an interface to verify that
@@ -445,27 +447,27 @@ usagi::usagi_t::processRefreshRequest (
 #endif
 
 	provider_->send (response, request_token);
-	LOG(INFO) << "Sent refresh.";
+	LOG(INFO) << "Sent update.";
 }
 
 bool
 usagi::usagi_t::sendRefresh()
 {
-/* 7.5.9.1 Create a response message (4.2.2) */
+/* 7.4.8.1 Create a response message (4.2.2) */
 	rfa::message::RespMsg response (false);	/* reference */
 
-/* 7.5.9.2 Set the message model type of the response. */
-	response.setMsgModelType (rfa::rdm::MMT_MARKET_PRICE);
-/* 7.5.9.3 Set response type. */
-	response.setRespType (rfa::message::RespMsg::UpdateEnum);
-/* 7.5.9.4 Set the response type enumation. */
-	response.setRespTypeNum (rfa::rdm::REFRESH_UNSOLICITED);
-
-/* 7.5.9.5 Create or re-use a request attribute object (4.2.4) */
+/* 7.4.8.2 Create or re-use a request attribute object (4.2.4) */
 	attribInfo_.clear();
 	attribInfo_.setNameType (rfa::rdm::INSTRUMENT_NAME_RIC);
 	attribInfo_.setName (msft_stream_->rfa_name);
 	attribInfo_.setServiceID (provider_->getServiceId());
+
+/* 7.4.8.3 Set the message model type of the response. */
+	response.setMsgModelType (rfa::rdm::MMT_MARKET_PRICE);
+/* 7.4.8.4 Set response type, response type number, and indication mask. */
+	response.setRespType (rfa::message::RespMsg::UpdateEnum);
+	response.setRespTypeNum (rfa::rdm::REFRESH_UNSOLICITED);
+	response.setIndicationMask (rfa::message::RespMsg::DoNotFilterFlag | rfa::message::RespMsg::DoNotRippleFlag);
 
 /* 4.3.1 RespMsg.Payload */
 // not std::map :(  derived from rfa::common::Data

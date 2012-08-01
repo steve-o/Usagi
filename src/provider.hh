@@ -47,6 +47,24 @@ namespace usagi
 	};
 
 	class client_t;
+	class item_stream_t;
+
+	class request_t : boost::noncopyable
+	{
+	public:
+		request_t (std::shared_ptr<item_stream_t>& item_stream_, std::shared_ptr<client_t>& client_, bool use_attribinfo_in_updates_)
+			: item_stream (item_stream_),
+			  client (client_),
+			  use_attribinfo_in_updates (use_attribinfo_in_updates_),
+			  is_muted (true)
+		{
+		}
+
+		std::weak_ptr<item_stream_t> item_stream;
+		std::weak_ptr<client_t> client;
+		const bool use_attribinfo_in_updates;	/* can theoretically change in reissue */
+		bool is_muted;				/* changes after refresh */
+	};
 
 	class item_stream_t : boost::noncopyable
 	{
@@ -58,8 +76,7 @@ namespace usagi
 /* Fixed name for this stream. */
 		rfa::common::RFA_String rfa_name;
 /* Request tokens for clients, can be more than one per client. */
-		std::unordered_map<rfa::sessionLayer::RequestToken*, 
-				   std::pair<std::shared_ptr<client_t>, bool>> clients;
+		std::unordered_map<rfa::sessionLayer::RequestToken*const, std::shared_ptr<request_t>> requests;
 		boost::shared_mutex lock;
 	};
 
@@ -141,6 +158,10 @@ namespace usagi
 
 		friend client_t;
 
+/* Entire request set */
+		std::unordered_map<rfa::sessionLayer::RequestToken*const, std::weak_ptr<request_t>> requests_;
+		boost::shared_mutex requests_lock_;
+
 /* Reuters Wire Format versions. */
 		boost::atomic_uint16_t min_rwf_version_;
 
@@ -162,7 +183,7 @@ namespace usagi
 		bool is_muted_;
 
 /* Container of all item streams keyed by symbol name. */
-		std::unordered_map<std::string, std::weak_ptr<item_stream_t>> directory_;
+		std::unordered_map<std::string, std::shared_ptr<item_stream_t>> directory_;
 		boost::shared_mutex directory_lock_;
 
 /* RFA request thread client. */

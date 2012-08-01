@@ -594,10 +594,10 @@ usagi::client_t::processItemRequest (
 				if ((bool)sp) {
 					auto stream = sp.get();
 					boost::upgrade_lock<boost::shared_mutex> lock (stream->lock);
-					auto it = stream->clients.find (&request_token);
-					DCHECK (it != stream->clients.end());
+					auto it = stream->requests.find (&request_token);
+					DCHECK (it != stream->requests.end());
 					boost::upgrade_to_unique_lock<boost::shared_mutex> uniqueLock (lock);
-					stream->clients.erase (it);
+					stream->requests.erase (it);
 				}
 /* remove from client item list. */
 				items_.erase (it);
@@ -661,12 +661,15 @@ usagi::client_t::processItemRequest (
 					return;
 				}
 				LOG(INFO) << prefix_ << "Sending refresh on request.";
-				auto stream = it->second.lock();
+				auto& stream = it->second;
 				DCHECK ((bool)stream);
 				items_.emplace (std::make_pair (&request_token, stream));
+				auto client_request = std::make_shared<request_t> (stream, shared_from_this(), use_attribinfo_in_updates);
+				CHECK((bool)client_request);
+				boost::unique_lock<boost::shared_mutex> requests_lock (provider_.requests_lock_);
 				boost::unique_lock<boost::shared_mutex> stream_lock (stream->lock);
-				stream->clients.emplace (std::make_pair (&request_token, 
-									 std::make_pair (shared_from_this(), use_attribinfo_in_updates)));
+				provider_.requests_.emplace (std::make_pair (&request_token, client_request));
+				stream->requests.emplace (std::make_pair (&request_token, client_request));
 /* forward request to worker pool */
 				provider::Request request;
 				zmq_msg_t msg;
@@ -715,10 +718,10 @@ usagi::client_t::processOMMInactiveClientSessionEvent (
 			if (!(bool)sp)
 				return;
 			boost::upgrade_lock<boost::shared_mutex> lock (sp->lock);
-			auto it = sp->clients.find (item.first);
-			DCHECK(sp->clients.end() != it);
+			auto it = sp->requests.find (item.first);
+			DCHECK(sp->requests.end() != it);
 			boost::upgrade_to_unique_lock<boost::shared_mutex> uniqueLock (lock);
-			sp->clients.erase (it);
+			sp->requests.erase (it);
 			VLOG(2) << prefix_ << sp->rfa_name;
 		});
 /* forward upstream to remove reference to this. */
