@@ -30,7 +30,8 @@ usagi::client_t::client_t (
 	login_token_ (nullptr),
 	rwf_major_version_ (0),
 	rwf_minor_version_ (0),
-	is_muted_ (true)
+	is_muted_ (true),
+	is_logged_in_ (false)
 {
 	ZeroMemory (cumulative_stats_, sizeof (cumulative_stats_));
 	ZeroMemory (snap_stats_, sizeof (snap_stats_));
@@ -262,6 +263,7 @@ usagi::client_t::processLoginRequest (
 
 /* save token for closing the session. */
 			login_token_ = &login_token;
+			is_logged_in_ = true;
 		}
 /* ignore any error */
 	} catch (rfa::common::InvalidUsageException& e) {
@@ -583,6 +585,13 @@ usagi::client_t::processItemRequest (
 		const size_t   item_name_len = request_msg.getAttribInfo().getName().size();
 		const bool use_attribinfo_in_updates = (0 != (request_msg.getIndicationMask() & rfa::message::ReqMsg::AttribInfoInUpdatesFlag));
 
+		if (!is_logged_in_) {
+			cumulative_stats_[CLIENT_PC_ITEM_REQUEST_REJECTED]++;
+			LOG(INFO) << prefix_ << "Closing request for client without accepted login.";
+			sendClose (request_token, service_id, model_type, item_name, use_attribinfo_in_updates, rfa::common::RespStatus::NotAuthorizedEnum);
+			return;
+		}
+
 /* Only accept MMT_MARKET_PRICE. */
 		if (rfa::rdm::MMT_MARKET_PRICE != model_type)
 		{
@@ -732,6 +741,8 @@ usagi::client_t::processOMMInactiveClientSessionEvent (
 	DCHECK(nullptr != handle_);
 	cumulative_stats_[CLIENT_PC_OMM_INACTIVE_CLIENT_SESSION_RECEIVED]++;
 	try {
+/* reject new item requests. */
+		is_logged_in_ = false;
 /* remove requests from item streams. */
 		VLOG(2) << prefix_ << "Removing client from " << items_.size() << " item streams.";
 		std::for_each (items_.begin(), items_.end(),

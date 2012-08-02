@@ -144,15 +144,14 @@ usagi::provider_t::createItemStream (
 	std::shared_ptr<item_stream_t> item_stream
 	)
 {
-	VLOG(4) << "Creating item stream for RIC \"" << name << "\".";
 	item_stream->rfa_name.set (name, 0, true);
 /* no tokens until subscription appears. */
 	const std::string key (name);
 	boost::unique_lock<boost::shared_mutex> lock (directory_lock_);
 	auto status = directory_.emplace (std::make_pair (key, item_stream));
+	VLOG(4) << "Creating item stream #" << directory_.size() << " for RIC \"" << name << "\".";
 	assert (true == status.second);
 	assert (directory_.end() != directory_.find (key));
-	DVLOG(4) << "Directory size: " << directory_.size();
 	last_activity_ = boost::posix_time::second_clock::universal_time();
 	return true;
 }
@@ -328,7 +327,7 @@ usagi::provider_t::processOMMActiveClientSessionEvent (
 {
 	cumulative_stats_[PROVIDER_PC_OMM_ACTIVE_CLIENT_SESSION_RECEIVED]++;
 	try {
-		if (!is_accepting_connections_)
+		if (!is_accepting_connections_ || clients_.size() == config_.session_capacity)
 			rejectClientSession (session_event.getClientSessionHandle());
 		else
 			acceptClientSession (session_event.getClientSessionHandle());

@@ -55,6 +55,7 @@ namespace usagi
 		CLIENT_PC_ITEM_REISSUE_REQUEST_RECEIVED,
 		CLIENT_PC_ITEM_CLOSE_REQUEST_RECEIVED,
 		CLIENT_PC_ITEM_REQUEST_MALFORMED,
+		CLIENT_PC_ITEM_REQUEST_REJECTED,
 		CLIENT_PC_ITEM_VALIDATED,
 		CLIENT_PC_ITEM_MALFORMED,
 		CLIENT_PC_ITEM_NOT_FOUND,
@@ -140,6 +141,10 @@ namespace usagi
  * permission is granted to submit data.
  */
 		bool is_muted_;
+
+/* Item requests may appear before login success has been granted.
+ */
+		bool is_logged_in_;
 
 /* RFA request thread client. */
 		std::shared_ptr<void> sender_;
