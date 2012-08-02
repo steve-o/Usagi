@@ -210,7 +210,8 @@ usagi::provider_t::send (
 	rfa::sessionLayer::RequestToken& token
 	)
 {
-/* find iteam stream for the token */
+/* find request and iteam stream for the token */
+	boost::shared_lock<boost::shared_mutex> requests_lock (requests_lock_);
 	auto it = requests_.find (&token);
 	if (requests_.end() == it)
 		return false;
@@ -221,7 +222,7 @@ usagi::provider_t::send (
 	if (!(bool)stream)
 		return false;
 /* lock updates for this stream */
-	boost::unique_lock<boost::shared_mutex> lock (stream->lock);
+	boost::unique_lock<boost::shared_mutex> stream_lock (stream->lock);
 /* forward refresh image */
 	send (static_cast<rfa::common::Msg&> (msg), token, nullptr);
 	cumulative_stats_[PROVIDER_PC_MSGS_SENT]++;
