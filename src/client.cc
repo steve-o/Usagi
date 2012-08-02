@@ -17,18 +17,6 @@
 #include "provider.hh"
 #include "provider.pb.h"
 
-/* RDM Usage Guide: Section 6.5: Enterprise Platform
- * For future compatibility, the DictionaryId should be set to 1 by providers.
- * The DictionaryId for the RDMFieldDictionary is 1.
- */
-static const int kDictionaryId = 1;
-
-/* RDM: Absolutely no idea. */
-static const int kFieldListId = 3;
-
-/* RDM Field Identifiers. */
-static const int kRdmRdnDisplayId = 2;		/* RDNDISPLAY */
-
 using rfa::common::RFA_String;
 
 usagi::client_t::client_t (
@@ -56,7 +44,7 @@ usagi::client_t::client_t (
 usagi::client_t::~client_t()
 {
 	using namespace boost::posix_time;
-	auto uptime = second_clock::universal_time() - creation_time_;
+	const auto uptime = second_clock::universal_time() - creation_time_;
 	VLOG(3) << prefix_ << "Summary: {"
 		 " \"Uptime\": \"" << to_simple_string (uptime) << "\""
 		", \"RfaEventsReceived\": " << cumulative_stats_[CLIENT_PC_RFA_EVENTS_RECEIVED] <<
@@ -242,6 +230,7 @@ usagi::client_t::processLoginRequest (
 /* Reject on RFA validation failing. */
 		if (rfa::message::MsgValidationError == validation_status) 
 		{
+			LOG(WARNING) << prefix_ << "Rejecting MMT_LOGIN as RFA validation failed.";
 			rejectLogin (login_msg, login_token);
 			return;
 		}
@@ -263,6 +252,8 @@ usagi::client_t::processLoginRequest (
 			|| !has_name
 			|| !has_nametype)
 		{
+			cumulative_stats_[CLIENT_PC_MMT_LOGIN_MALFORMED]++;
+			LOG(WARNING) << prefix_ << "Rejecting MMT_LOGIN as RDM validation failed: " << login_msg;
 			rejectLogin (login_msg, login_token);
 		}
 		else
@@ -274,6 +265,7 @@ usagi::client_t::processLoginRequest (
 		}
 /* ignore any error */
 	} catch (rfa::common::InvalidUsageException& e) {
+		cumulative_stats_[CLIENT_PC_MMT_LOGIN_EXCEPTION]++;
 		LOG(ERROR) << prefix_ <<
 			"MMT_LOGIN::InvalidUsageException: { "
 			   "\"StatusText\": \"" << e.getStatus().getStatusText() << "\""
@@ -304,7 +296,7 @@ usagi::client_t::rejectLogin (
 	rfa::sessionLayer::RequestToken& login_token
 	)
 {
-	VLOG(2) << prefix_ << "Rejecting MMT_LOGIN request.";
+	VLOG(2) << prefix_ << "Sending MMT_LOGIN rejection.";
 
 /* 7.5.9.1 Create a response message (4.2.2) */
 	rfa::message::RespMsg response;
@@ -369,7 +361,7 @@ usagi::client_t::acceptLogin (
 	rfa::sessionLayer::RequestToken& login_token
 	)
 {
-	VLOG(2) << prefix_ << "Accepting MMT_LOGIN request.";
+	VLOG(2) << prefix_ << "Sending MMT_LOGIN accepted.";
 
 /* 7.5.9.1 Create a response message (4.2.2) */
 	rfa::message::RespMsg response;
@@ -493,6 +485,13 @@ usagi::client_t::processDirectoryRequest (
 	static const uint8_t streaming_request = snapshot_request | rfa::message::ReqMsg::InterestAfterRefreshFlag;
 
 	try {
+/* Reject on RFA validation failing. */
+		if (rfa::message::MsgValidationError == validation_status) 
+		{
+			LOG(WARNING) << prefix_ << "Discarded MMT_DIRECTORY request as RFA validation failed.";
+			return;
+		}
+
 /* RDM 4.2.4 AttribInfo required for ReqMsg. */
 		const bool has_attribinfo = (0 != (request_msg.getHintMask() & rfa::message::ReqMsg::AttribInfoFlag));
 
@@ -502,6 +501,8 @@ usagi::client_t::processDirectoryRequest (
 		if ((!is_snapshot_request && !is_streaming_request)
 			|| !has_attribinfo)
 		{
+			cumulative_stats_[CLIENT_PC_MMT_DIRECTORY_MALFORMED]++;
+			LOG(WARNING) << prefix_ << "Discarded MMT_DIRECTORY request as RDM validation failed: " << request_msg;
 			return;
 		}
 
@@ -514,6 +515,19 @@ usagi::client_t::processDirectoryRequest (
 			const char* service_name = request_msg.getAttribInfo().getServiceName().c_str();
 			sendDirectoryResponse (request_token, service_name, filter_mask);
 		}
+/* Provides ServiceID */
+		else if (0 != (request_msg.getAttribInfo().getHintMask() & rfa::message::AttribInfo::ServiceIDFlag) &&
+			0 != provider_.getServiceId() /* service id is unknown */)
+		{
+			const uint32_t service_id = request_msg.getAttribInfo().getServiceID();
+			if (service_id == provider_.getServiceId()) {
+				sendDirectoryResponse (request_token, provider_.getServiceName(), filter_mask);
+			} else {
+/* default to full directory if id does not match */
+				LOG(WARNING) << prefix_ << "Received MMT_DIRECTORY request for unknown service id #" << service_id << ", returning entire directory.";
+				sendDirectoryResponse (request_token, nullptr, filter_mask);
+			}
+		}
 /* Provide all services directory. */
 		else
 		{
@@ -521,6 +535,7 @@ usagi::client_t::processDirectoryRequest (
 		}
 /* ignore any error */
 	} catch (rfa::common::InvalidUsageException& e) {
+		cumulative_stats_[CLIENT_PC_MMT_DIRECTORY_EXCEPTION]++;
 		LOG(ERROR) << prefix_ << "MMT_DIRECTORY::InvalidUsageException: { "
 				"\"StatusText\": \"" << e.getStatus().getStatusText() << "\""
 				" }";
@@ -571,6 +586,7 @@ usagi::client_t::processItemRequest (
 /* Only accept MMT_MARKET_PRICE. */
 		if (rfa::rdm::MMT_MARKET_PRICE != model_type)
 		{
+			cumulative_stats_[CLIENT_PC_ITEM_REQUEST_MALFORMED]++;
 			LOG(INFO) << prefix_ << "Closing request for unsupported message model type.";
 			sendClose (request_token, service_id, model_type, item_name, use_attribinfo_in_updates, rfa::common::RespStatus::NotAuthorizedEnum);
 			return;
@@ -589,6 +605,7 @@ usagi::client_t::processItemRequest (
 			if (is_close)
 			{
 /* remove from item client list. */
+				cumulative_stats_[CLIENT_PC_ITEM_CLOSE_REQUEST_RECEIVED]++;
 				LOG(INFO) << prefix_ << "Closing open request.";
 				auto sp = it->second.lock();
 				if ((bool)sp) {
@@ -605,6 +622,7 @@ usagi::client_t::processItemRequest (
 			else if (!is_streaming_request)
 			{
 /* invalid. */
+				cumulative_stats_[CLIENT_PC_ITEM_REQUEST_MALFORMED]++;
 				LOG(INFO) << prefix_ << "Closing open request on invalid snapshot reissue request.";
 				sendClose (request_token, service_id, model_type, item_name, use_attribinfo_in_updates, rfa::common::RespStatus::NotAuthorizedEnum);
 			}
@@ -614,6 +632,7 @@ usagi::client_t::processItemRequest (
  * A consumer application can request a new refresh and change certain
  * parameters on an already requested stream.
  */
+				cumulative_stats_[CLIENT_PC_ITEM_REISSUE_REQUEST_RECEIVED]++;
 				LOG(INFO) << prefix_ << "Sending refresh on reissue request.";
 				provider::Request request;
 				zmq_msg_t msg;
@@ -642,11 +661,13 @@ usagi::client_t::processItemRequest (
 			if (is_close)
 			{
 /* invalid. */
+				cumulative_stats_[CLIENT_PC_ITEM_REQUEST_MALFORMED]++;
 				LOG(INFO) << prefix_ << "Discarding close request on closed item.";
 			}
 			else if (!is_streaming_request)
 			{
 /* closest equivalent to not-supported is NotAuthorizedEnum. */
+				cumulative_stats_[CLIENT_PC_ITEM_REQUEST_MALFORMED]++;
 				LOG(INFO) << prefix_ << "Closing unsupported snapshot request.";
 				sendClose (request_token, service_id, model_type, item_name, use_attribinfo_in_updates, rfa::common::RespStatus::NotAuthorizedEnum);
 			}
@@ -656,6 +677,7 @@ usagi::client_t::processItemRequest (
 				boost::shared_lock<boost::shared_mutex> directory_lock (provider_.directory_lock_);
 				auto it = provider_.directory_.find (item_name);
 				if (it == provider_.directory_.end()) {
+					cumulative_stats_[CLIENT_PC_ITEM_NOT_FOUND]++;
 					LOG(INFO) << prefix_ << "Closing request for item not found in directory.";
 					sendClose (request_token, service_id, model_type, item_name, use_attribinfo_in_updates, rfa::common::RespStatus::NotFoundEnum);
 					return;
@@ -686,6 +708,7 @@ usagi::client_t::processItemRequest (
 		}
 /* ignore any error */
 	} catch (rfa::common::InvalidUsageException& e) {
+		cumulative_stats_[CLIENT_PC_ITEM_EXCEPTION]++;
 		LOG(ERROR) << prefix_ << "InvalidUsageException: { "
 				   "\"StatusText\": \"" << e.getStatus().getStatusText() << "\"" <<
 				", " << request_msg <<
@@ -730,6 +753,7 @@ usagi::client_t::processOMMInactiveClientSessionEvent (
 		handle_ = nullptr;
 /* ignore any error */
 	} catch (rfa::common::InvalidUsageException& e) {
+		cumulative_stats_[CLIENT_PC_OMM_INACTIVE_CLIENT_SESSION_EXCEPTION]++;
 		LOG(ERROR) << prefix_ << "OMMInactiveClientSession::InvalidUsageException: { "
 				"\"StatusText\": \"" << e.getStatus().getStatusText() << "\""
 				" }";
@@ -851,14 +875,7 @@ usagi::client_t::sendClose (
 	}
 #endif
 
-	submit (static_cast<rfa::common::Msg&> (response), request_token, nullptr);
-	switch (status_code) {
-	case rfa::common::RespStatus::NotFoundEnum:
-		cumulative_stats_[CLIENT_PC_ITEM_NOT_FOUND]++;
-		break;
-	default:
-		break;
-	}
+	submit (static_cast<rfa::common::Msg&> (response), request_token, nullptr);	
 	cumulative_stats_[CLIENT_PC_ITEM_CLOSED]++;
 	return true;
 }

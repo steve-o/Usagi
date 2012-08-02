@@ -415,7 +415,7 @@ usagi::usagi_t::processRefreshRequest (
 /* Set a reference to field list, not a copy */
 	response.setPayload (fields_);
 
-#if 0
+/** Optional: but require to replace stale values in cache when stale values are supported. **/
 	rfa::common::RespStatus status;
 /* Item interaction state: Open, Closed, ClosedRecover, Redirected, NonStreaming, or Unspecified. */
 	status.setStreamState (rfa::common::RespStatus::OpenEnum);
@@ -424,7 +424,6 @@ usagi::usagi_t::processRefreshRequest (
 /* Error code, e.g. NotFound, InvalidArgument, ... */
 	status.setStatusCode (rfa::common::RespStatus::NoneEnum);
 	response.setRespStatus (status);
-#endif
 
 #ifdef DEBUG
 /* 4.2.8 Message Validation.  RFA provides an interface to verify that

@@ -169,6 +169,7 @@ usagi::provider_t::send (
 {
 	unsigned i = 0;
 	boost::shared_lock<boost::shared_mutex> stream_lock (stream.lock);
+	const auto now = boost::posix_time::second_clock::universal_time();
 /* first iteration without AttribInfo */
 	std::for_each (stream.requests.begin(), stream.requests.end(),
 		[&](std::pair<rfa::sessionLayer::RequestToken*const, std::shared_ptr<request_t>>& request)
@@ -176,9 +177,11 @@ usagi::provider_t::send (
 		if (request.second->is_muted || request.second->use_attribinfo_in_updates)
 			return;
 		send (static_cast<rfa::common::Msg&> (msg), *(request.first), nullptr);
-		auto sp = request.second->client.lock();
-		if ((bool)sp)
-			sp->cumulative_stats_[CLIENT_PC_RFA_MSGS_SENT]++;
+		auto client = request.second->client.lock();
+		if ((bool)client) {
+			client->cumulative_stats_[CLIENT_PC_RFA_MSGS_SENT]++;
+			client->last_activity_ = now;
+		}
 		++i;
 	});
 /* second iteration with AttribInfo */
@@ -191,14 +194,16 @@ usagi::provider_t::send (
 			if (request.second->is_muted || !request.second->use_attribinfo_in_updates)
 				return;
 			send (static_cast<rfa::common::Msg&> (msg), *(request.first), nullptr);
-			auto sp = request.second->client.lock();
-			if ((bool)sp)
-				sp->cumulative_stats_[CLIENT_PC_RFA_MSGS_SENT]++;
+			auto client = request.second->client.lock();
+			if ((bool)client) {
+				client->cumulative_stats_[CLIENT_PC_RFA_MSGS_SENT]++;
+				client->last_activity_ = now;
+			}
 			++i;
 		});
 	}
 	cumulative_stats_[PROVIDER_PC_MSGS_SENT]++;
-	last_activity_ = boost::posix_time::second_clock::universal_time();
+	last_activity_ = now;
 	return true;
 }
 
@@ -215,18 +220,22 @@ usagi::provider_t::send (
 	auto it = requests_.find (&token);
 	if (requests_.end() == it)
 		return false;
-	auto request = it->second.lock();
+	auto request = it->second.lock();	// weak_ptr for request_t
 	if (!(bool)request)
 		return false;
-	auto stream = request->item_stream.lock();
+	auto stream = request->item_stream.lock();	// weak_ptr for item_stream_t
 	if (!(bool)stream)
+		return false;
+	auto client = request->client.lock();	// weak_ptr for client_t;
+	if (!(bool)client)
 		return false;
 /* lock updates for this stream */
 	boost::unique_lock<boost::shared_mutex> stream_lock (stream->lock);
 /* forward refresh image */
 	send (static_cast<rfa::common::Msg&> (msg), token, nullptr);
 	cumulative_stats_[PROVIDER_PC_MSGS_SENT]++;
-	last_activity_ = boost::posix_time::second_clock::universal_time();
+	client->cumulative_stats_[CLIENT_PC_RFA_MSGS_SENT]++;
+	client->last_activity_ = last_activity_ = boost::posix_time::second_clock::universal_time();
 /* enable updates for this request */
 	request->is_muted = false;
 /* unlock */
@@ -325,6 +334,7 @@ usagi::provider_t::processOMMActiveClientSessionEvent (
 			acceptClientSession (session_event.getClientSessionHandle());
 /* ignore any error */
 	} catch (rfa::common::InvalidUsageException& e) {
+		cumulative_stats_[PROVIDER_PC_OMM_ACTIVE_CLIENT_SESSION_EXCEPTION]++;
 		LOG(ERROR) << "OMMActiveClientSession::InvalidUsageException: { "
 				"\"StatusText\": \"" << e.getStatus().getStatusText() << "\""
 				" }";
