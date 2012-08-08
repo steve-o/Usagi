@@ -38,14 +38,18 @@ static std::weak_ptr<rfa::common::EventQueue> g_event_queue;
 class usagi::worker_t
 {
 public:
-	worker_t (usagi_t& usagi, std::shared_ptr<void>& context, unsigned id) :
-		usagi_ (usagi),
+	worker_t (std::shared_ptr<provider_t> provider, const config_t& config, std::shared_ptr<void>& context, unsigned id) :
+		id_ (id),
 		context_ (context),
-		id_ (id)
+		response_ (false),	/* reference */
+		fields_ (false),
+		attribInfo_ (false),
+		provider_ (provider),
+		config_ (config)
 	{
 /* Set logger ID */
 		std::ostringstream ss;
-		ss << id << ':';
+		ss << "Worker " << std::hex << std::setiosflags (std::ios_base::showbase) << id << ':';
 		prefix_.assign (ss.str());
 	}
 
@@ -112,6 +116,24 @@ protected:
 				"\"What\": \"" << e.what() << "\""
 				" }";
 		}
+
+		try {
+/* Pre-allocate memory buffer for RFA payload iterator */
+			fields_ = std::make_shared<rfa::data::FieldList> ();
+			CHECK ((bool)fields_);
+
+			CHECK (config_.maximum_data_size > 0);
+			single_write_it_ = std::make_shared<rfa::data::SingleWriteIterator> ();
+			CHECK ((bool)single_write_it_);
+			single_write_it_->initialize (*fields_.get(), static_cast<int> (config_.maximum_data_size));
+			CHECK (single_write_it_->isInitialized());
+		} catch (rfa::common::InvalidUsageException& e) {
+			LOG(ERROR) << prefix_ << "InvalidUsageException: { "
+				  "\"Severity\": \"" << severity_string (e.getSeverity()) << "\""
+				", \"Classification\": \"" << classification_string (e.getClassification()) << "\""
+				", \"StatusText\": \"" << e.getStatus().getStatusText() << "\""
+				" }";
+		}
 	}
 
 	bool GetRequest (provider::Request* request)
@@ -143,8 +165,83 @@ protected:
 		uint8_t rwf_minor_version
 		)
 	{
-/* forward to main application. */
-		usagi_.processRequest (request_token, service_id, model_type, item_name, rwf_major_version, rwf_minor_version);
+		VLOG(2) << "Sending blank response to incoming refresh request: { "
+			  "\"RequestToken\": \"" << (intptr_t)&request_token << "\""
+			", \"ServiceID\": " << service_id <<
+			", \"MsgModelType\": " << (int)model_type <<
+			", \"Name\": \"" << item_name << "\""
+			", \"RwfMajorVersion\": " << (int)rwf_major_version <<
+			", \"RwfMinorVersion\": " << (int)rwf_minor_version <<
+			" }";
+/* 7.5.9.1 Create a response message (4.2.2) */
+		response_.clear();
+
+/* 7.5.9.2 Set the message model type of the response. */
+		response_.setMsgModelType (model_type);
+/* 7.5.9.3 Set response type. */
+		response_.setRespType (rfa::message::RespMsg::RefreshEnum);
+		response_.setIndicationMask (rfa::message::RespMsg::RefreshCompleteFlag | rfa::message::RespMsg::DoNotRippleFlag);
+
+/* 7.5.9.5 Create or re-use a request attribute object (4.2.4) */
+		attribInfo_.clear();
+		attribInfo_.setNameType (rfa::rdm::INSTRUMENT_NAME_RIC);
+		RFA_String name (item_name, 0, false);	/* reference */
+		attribInfo_.setServiceID (service_id);
+		attribInfo_.setName (name);
+		response_.setAttribInfo (attribInfo_);
+
+/* 4.3.1 RespMsg.Payload */
+// not std::map :(  derived from rfa::common::Data
+		fields_->setAssociatedMetaInfo (rwf_major_version, rwf_minor_version);
+		fields_->setInfo (kDictionaryId, kFieldListId);
+
+/* Clear required for SingleWriteIterator state machine. */
+		auto& it = *single_write_it_.get();
+		DCHECK (it.isInitialized());
+		it.clear();
+		it.start (*fields_.get());
+
+		rfa::data::FieldEntry field (false);
+		field.setFieldID (kRdmRdnDisplayId);
+		it.bind (field);
+		it.setUInt (100);
+
+		it.complete();
+/* Set a reference to field list, not a copy */
+		response_.setPayload (*fields_.get());
+
+/** Optional: but require to replace stale values in cache when stale values are supported. **/
+		status_.clear();
+/* Item interaction state: Open, Closed, ClosedRecover, Redirected, NonStreaming, or Unspecified. */
+		status_.setStreamState (rfa::common::RespStatus::OpenEnum);
+/* Data quality state: Ok, Suspect, or Unspecified. */
+		status_.setDataState (rfa::common::RespStatus::OkEnum);
+/* Error code, e.g. NotFound, InvalidArgument, ... */
+		status_.setStatusCode (rfa::common::RespStatus::NoneEnum);
+		response_.setRespStatus (status_);
+
+#ifdef DEBUG
+/* 4.2.8 Message Validation.  RFA provides an interface to verify that
+ * constructed messages of these types conform to the Reuters Domain
+ * Models as specified in RFA API 7 RDM Usage Guide.
+ */
+		uint8_t validation_status = rfa::message::MsgValidationError;
+		try {
+			RFA_String warningText;
+			validation_status = response.validateMsg (&warningText);
+			if (rfa::message::MsgValidationWarning == validation_status)
+				LOG(ERROR) << prefix_ << "validateMsg: { \"warningText\": \"" << warningText << "\" }";
+		} catch (rfa::common::InvalidUsageException& e) {
+			LOG(ERROR) << prefix_ <<
+				"InvalidUsageException: { " <<
+				   "\"StatusText\": \"" << e.getStatus().getStatusText() << "\""
+				", " << response_ <<
+				" }";
+		}
+#endif
+
+		provider_->send (response_, request_token);
+		LOG(INFO) << "Sent update.";
 	}
 	
 /* worker unique identifier */
@@ -160,8 +257,20 @@ protected:
 /* Incoming 0mq message */
 	zmq_msg_t msg_;
 
+/* Outgoing rfa message */
+	rfa::message::RespMsg response_;
+
+/* Publish fields. */
+	std::shared_ptr<rfa::data::FieldList> fields_;	/* no copy ctor: cannot use unique_ptr */
+	rfa::message::AttribInfo attribInfo_;
+	rfa::common::RespStatus status_;
+
+/* Iterator for populating publish fields */
+	std::shared_ptr<rfa::data::SingleWriteIterator> single_write_it_;	/* no copy ctor */
+
 /* application reference */
-	usagi_t& usagi_;
+	std::shared_ptr<provider_t> provider_;
+	const config_t& config_;
 };
 
 usagi::usagi_t::~usagi_t()
@@ -250,7 +359,7 @@ usagi::usagi_t::run ()
 		for (size_t i = 0; i < config_.worker_count; ++i) {
 			const unsigned worker_id = (unsigned)(1 + i);
 			LOG(INFO) << "Spawning worker #" << worker_id;
-			auto worker = std::make_shared<worker_t> (*this, zmq_context_, worker_id);
+			auto worker = std::make_shared<worker_t> (provider_, config_, zmq_context_, worker_id);
 			if (!(bool)worker)
 				goto cleanup;
 			auto thread = std::make_shared<boost::thread> (*worker.get());
@@ -352,18 +461,28 @@ usagi::usagi_t::clear()
 
 /* Interrupt worker threads. */
 	if (!workers_.empty()) {
-		LOG(INFO) << "Sending interrupt to worker threads.";
+		LOG(INFO) << "Reviewing worker threads.";
 		provider::Request request;
 		request.set_msg_type (provider::Request::MSG_ABORT);
 		zmq_msg_t msg;
-		zmq_msg_init_size (&msg, request.ByteSize());
-		request.SerializeToArray (zmq_msg_data (&msg), (int)zmq_msg_size (&msg));
-		zmq_send (abort_sock_.get(), &msg, 0);
-		zmq_msg_close (&msg);
-		LOG(INFO) << "Awaiting worker threads to terminate.";
+		unsigned active_threads = 0;
 		for (auto it = workers_.begin(); it != workers_.end(); ++it) {
-			if ((bool)it->second) it->second->join();
-			it->first.reset();
+			if ((bool)it->second && it->second->joinable()) {
+				zmq_msg_init_size (&msg, request.ByteSize());
+				request.SerializeToArray (zmq_msg_data (&msg), (int)zmq_msg_size (&msg));
+				zmq_send (abort_sock_.get(), &msg, 0);
+				zmq_msg_close (&msg);
+				++active_threads;
+			}
+		}
+		if (active_threads > 0) {
+			LOG(INFO) << "Sending interrupt to " << active_threads << " worker threads.";
+			for (auto it = workers_.begin(); it != workers_.end(); ++it) {
+				if ((bool)it->second && it->second->joinable())
+					it->second->join();
+				LOG(INFO) << "Thread #" << it->first->GetId() << "joined.";
+				it->first.reset();
+			}
 		}
 		LOG(INFO) << "All worker threads joined.";
 	}
@@ -417,101 +536,11 @@ usagi::usagi_t::processTimer (
 	return true;
 }
 
-/* Refresh request entry point. */
-void
-usagi::usagi_t::processRequest (
-	rfa::sessionLayer::RequestToken& request_token,
-	uint32_t service_id,
-	uint8_t model_type,
-	const char* name_c,
-	uint8_t rwf_major_version,
-	uint8_t rwf_minor_version
-	)
-{
-	VLOG(2) << "Sending blank response to incoming refresh request: { "
-		  "\"RequestToken\": \"" << (intptr_t)&request_token << "\""
-		", \"ServiceID\": " << service_id <<
-		", \"MsgModelType\": " << (int)model_type <<
-		", \"Name\": \"" << name_c << "\""
-		", \"RwfMajorVersion\": " << (int)rwf_major_version <<
-		", \"RwfMinorVersion\": " << (int)rwf_minor_version <<
-		" }";
-/* 7.5.9.1 Create a response message (4.2.2) */
-	rfa::message::RespMsg response (false);	/* reference */
-
-/* 7.5.9.2 Set the message model type of the response. */
-	response.setMsgModelType (model_type);
-/* 7.5.9.3 Set response type. */
-	response.setRespType (rfa::message::RespMsg::RefreshEnum);
-	response.setIndicationMask (rfa::message::RespMsg::RefreshCompleteFlag | rfa::message::RespMsg::DoNotRippleFlag);
-
-/* 7.5.9.5 Create or re-use a request attribute object (4.2.4) */
-	attribInfo_.clear();
-	attribInfo_.setNameType (rfa::rdm::INSTRUMENT_NAME_RIC);
-	RFA_String name (name_c, 0, false);	/* reference */
-	attribInfo_.setServiceID (service_id);
-	attribInfo_.setName (name);
-	response.setAttribInfo (attribInfo_);
-
-/* 4.3.1 RespMsg.Payload */
-// not std::map :(  derived from rfa::common::Data
-	fields_.setAssociatedMetaInfo (rwf_major_version, rwf_minor_version);
-	fields_.setInfo (kDictionaryId, kFieldListId);
-
-/* Clear required for SingleWriteIterator state machine. */
-	auto& it = single_write_it_;
-	DCHECK (it.isInitialized());
-	it.clear();
-	it.start (fields_);
-
-	rfa::data::FieldEntry field (false);
-	field.setFieldID (kRdmRdnDisplayId);
-	it.bind (field);
-	it.setUInt (100);
-
-	it.complete();
-/* Set a reference to field list, not a copy */
-	response.setPayload (fields_);
-
-/** Optional: but require to replace stale values in cache when stale values are supported. **/
-	rfa::common::RespStatus status;
-/* Item interaction state: Open, Closed, ClosedRecover, Redirected, NonStreaming, or Unspecified. */
-	status.setStreamState (rfa::common::RespStatus::OpenEnum);
-/* Data quality state: Ok, Suspect, or Unspecified. */
-	status.setDataState (rfa::common::RespStatus::OkEnum);
-/* Error code, e.g. NotFound, InvalidArgument, ... */
-	status.setStatusCode (rfa::common::RespStatus::NoneEnum);
-	response.setRespStatus (status);
-
-#ifdef DEBUG
-/* 4.2.8 Message Validation.  RFA provides an interface to verify that
- * constructed messages of these types conform to the Reuters Domain
- * Models as specified in RFA API 7 RDM Usage Guide.
- */
-	uint8_t validation_status = rfa::message::MsgValidationError;
-	try {
-		RFA_String warningText;
-		validation_status = response.validateMsg (&warningText);
-		if (rfa::message::MsgValidationWarning == validation_status)
-			LOG(ERROR) << prefix_ << "validateMsg: { \"warningText\": \"" << warningText << "\" }";
-	} catch (rfa::common::InvalidUsageException& e) {
-		LOG(ERROR) << prefix_ <<
-			"InvalidUsageException: { " <<
-			   "\"StatusText\": \"" << e.getStatus().getStatusText() << "\""
-			", " << response <<
-			" }";
-	}
-#endif
-
-	provider_->send (response, request_token);
-	LOG(INFO) << "Sent update.";
-}
-
 bool
 usagi::usagi_t::sendRefresh()
 {
 /* 7.4.8.1 Create a response message (4.2.2) */
-	rfa::message::RespMsg response (false);	/* reference */
+	response_.clear();
 
 /* 7.4.8.2 Create or re-use a request attribute object (4.2.4) */
 	attribInfo_.clear();
@@ -520,11 +549,11 @@ usagi::usagi_t::sendRefresh()
 	attribInfo_.setServiceID (provider_->getServiceId());
 
 /* 7.4.8.3 Set the message model type of the response. */
-	response.setMsgModelType (rfa::rdm::MMT_MARKET_PRICE);
+	response_.setMsgModelType (rfa::rdm::MMT_MARKET_PRICE);
 /* 7.4.8.4 Set response type, response type number, and indication mask. */
-	response.setRespType (rfa::message::RespMsg::UpdateEnum);
-	response.setRespTypeNum (rfa::rdm::REFRESH_UNSOLICITED);
-	response.setIndicationMask (rfa::message::RespMsg::DoNotFilterFlag | rfa::message::RespMsg::DoNotRippleFlag);
+	response_.setRespType (rfa::message::RespMsg::UpdateEnum);
+	response_.setRespTypeNum (rfa::rdm::REFRESH_UNSOLICITED);
+	response_.setIndicationMask (rfa::message::RespMsg::DoNotFilterFlag | rfa::message::RespMsg::DoNotRippleFlag);
 
 /* 4.3.1 RespMsg.Payload */
 // not std::map :(  derived from rfa::common::Data
@@ -545,7 +574,7 @@ usagi::usagi_t::sendRefresh()
 
 	it.complete();
 /* Set a reference to field list, not a copy */
-	response.setPayload (fields_);
+	response_.setPayload (fields_);
 
 #ifdef DEBUG
 /* 4.2.8 Message Validation.  RFA provides an interface to verify that
@@ -560,13 +589,13 @@ usagi::usagi_t::sendRefresh()
 			LOG(ERROR) << prefix_ << "MMT_MARKET_PRICE::validateMsg: { \"warningText\": \"" << warningText << "\" }";
 	} catch (rfa::common::InvalidUsageException& e) {
 		LOG(ERROR) << "MMT_MARKET_PRICE::InvalidUsageException: { " <<
-				   response <<
+				   response_ <<
 				", \"StatusText\": \"" << e.getStatus().getStatusText() << "\""
 				" }";
 	}
 #endif
 
-	provider_->send (*msft_stream_.get(), response, attribInfo_);
+	provider_->send (*msft_stream_.get(), response_, attribInfo_);
 	LOG(INFO) << "Sent refresh.";
 	return true;
 }

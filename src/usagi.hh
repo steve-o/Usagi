@@ -98,20 +98,12 @@ namespace usagi
 		time_base_t<Clock, Duration>* cb_;
 	};
 
-/* Client request event source */
-	class request_base_t
-	{
-	public:
-		virtual void processRequest (rfa::sessionLayer::RequestToken& token, uint32_t service_id, uint8_t model_type, const char* name, uint8_t rwf_major_version, uint8_t rwf_minor_version) = 0;
-	};
-
 	class usagi_t :
-		public std::enable_shared_from_this<usagi_t>,
 		public time_base_t<boost::chrono::system_clock>,
-		public request_base_t,
 		boost::noncopyable
 	{
 	public:
+		usagi_t() : response_ (false), fields_ (false), attribInfo_ (false) {}
 		~usagi_t();
 
 /* Run the provider with the given command-line parameters.
@@ -122,9 +114,6 @@ namespace usagi
 
 /* Configured period timer entry point. */
 		bool processTimer (const boost::chrono::time_point<boost::chrono::system_clock>& t) override;
-
-/* Refresh request entry point. */
-		void processRequest (rfa::sessionLayer::RequestToken& token, uint32_t service_id, uint8_t model_type, const char* name, uint8_t rwf_major_version, uint8_t rwf_minor_version) override;
 
 	private:
 
@@ -152,9 +141,11 @@ namespace usagi
 /* Item stream. */
 		std::shared_ptr<broadcast_stream_t> msft_stream_;
 
-/* Publish fields. */
+/* Publish state. */
+		rfa::message::RespMsg response_;
 		rfa::data::FieldList fields_;
 		rfa::message::AttribInfo attribInfo_;
+		rfa::common::RespStatus status_;
 
 /* Iterator for populating publish fields */
 		rfa::data::SingleWriteIterator single_write_it_;
