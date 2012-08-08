@@ -33,7 +33,7 @@ static const int kRdmTradePriceId = 6;		/* TRDPRC_1 */
 
 using rfa::common::RFA_String;
 
-static std::weak_ptr<rfa::common::EventQueue> g_event_queue;
+static SOCKET g_abort_sock = INVALID_SOCKET;
 
 class usagi::worker_t
 {
@@ -109,7 +109,7 @@ protected:
 			rc = zmq_connect (receiver_.get(), "inproc://usagi/refresh");
 			CHECK(0 == rc);
 /* Also bind for terminating interrupt. */
-			rc = zmq_connect (receiver_.get(), "inproc://usagi/abort");
+			rc = zmq_connect (receiver_.get(), "inproc://usagi/worker/abort");
 			CHECK(0 == rc);
 		} catch (std::exception& e) {
 			LOG(ERROR) << prefix_ << "ZeroMQ::Exception: { "
@@ -305,8 +305,6 @@ usagi::usagi_t::run ()
 		event_queue_.reset (rfa::common::EventQueue::create (eventQueueName), std::mem_fun (&rfa::common::EventQueue::destroy));
 		if (!(bool)event_queue_)
 			goto cleanup;
-/* Create weak pointer to handle application shutdown. */
-		g_event_queue = event_queue_;
 
 /* RFA logging. */
 		log_.reset (new logging::LogEventProvider (config_, event_queue_));
@@ -351,9 +349,9 @@ usagi::usagi_t::run ()
 	try {
 		std::function<int(void*)> zmq_close_deleter = zmq_close;
 /* Worker abort socket. */
-		abort_sock_.reset (zmq_socket (zmq_context_.get(), ZMQ_PUSH), zmq_close_deleter);
-		CHECK((bool)abort_sock_);
-		int rc = zmq_bind (abort_sock_.get(), "inproc://usagi/abort");
+		worker_abort_sock_.reset (zmq_socket (zmq_context_.get(), ZMQ_PUSH), zmq_close_deleter);
+		CHECK((bool)worker_abort_sock_);
+		int rc = zmq_bind (worker_abort_sock_.get(), "inproc://usagi/worker/abort");
 		CHECK(0 == rc);
 /* Worker threads. */
 		for (size_t i = 0; i < config_.worker_count; ++i) {
@@ -427,25 +425,139 @@ CtrlHandler (
 		message = "Caught shutdown event, shutting down";
 		break;
 	}
-/* if available, deactivate global event queue pointer to break running loop. */
-	if (!g_event_queue.expired()) {
-		auto sp = g_event_queue.lock();
-		sp->deactivate();
+/* if available, raise event on global abort socket to break out of zmq_poll. */
+	if (INVALID_SOCKET != g_abort_sock) {
+		const char one = '1';
+		send (g_abort_sock, &one, sizeof (one), 0);
 	}
 	LOG(INFO) << message;
 	return TRUE;
 }
 
+class rfa_dispatcher_t : public rfa::common::DispatchableNotificationClient
+{
+public:
+	rfa_dispatcher_t (std::shared_ptr<void> zmq_context) : context_ (zmq_context) {}
+
+	int init (void)
+	{
+		std::function<int(void*)> zmq_close_deleter = zmq_close;
+		CHECK((bool)context_);
+		sender_.reset (zmq_socket (context_.get(), ZMQ_PUSH), zmq_close_deleter);
+		CHECK((bool)sender_);
+		return zmq_connect (sender_.get(), "inproc://usagi/rfa/event");
+	}
+
+	void notify (rfa::common::Dispatchable& eventSource, void* closure) override
+	{
+		DCHECK((bool)sender_);
+		zmq_msg_init_size (&msg_, 0);
+		zmq_send (sender_.get(), &msg_, 0);
+		zmq_msg_close (&msg_);		
+	}
+
+protected:
+	std::shared_ptr<void> context_;
+	std::shared_ptr<void> sender_;
+	zmq_msg_t msg_;
+};
+
 void
 usagi::usagi_t::mainLoop()
 {
+	std::function<int(void*)> zmq_close_deleter = zmq_close;
+	rfa_dispatcher_t dispatcher (zmq_context_);
+	zmq_pollitem_t items[2];
+	SOCKET s[2];
+	std::shared_ptr<void> rfa_receiver;
+
+/* pull RFA events */
+	rfa_receiver.reset (zmq_socket (zmq_context_.get(), ZMQ_PULL), zmq_close_deleter);
+	CHECK((bool)rfa_receiver);
+	int rc = zmq_bind (rfa_receiver.get(), "inproc://usagi/rfa/event");
+	CHECK(0 == rc);
+	items[0].socket = rfa_receiver.get();
+	items[0].events = ZMQ_POLLIN;
+
+/* pull abort event */
+/* use loopback sockets to simulate a pipe suitable for win32/select() */
+        struct sockaddr_in addr;
+        SOCKET listener;
+        int sockerr;
+        int addrlen = sizeof (addr);
+        unsigned long one = 1;
+
+	s[0] = s[1] = INVALID_SOCKET;
+
+        listener = socket (AF_INET, SOCK_STREAM, 0);
+        assert (listener != INVALID_SOCKET);
+
+	ZeroMemory (&addr, sizeof (addr));
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = inet_addr ("127.0.0.1");
+        assert (addr.sin_addr.s_addr != INADDR_NONE);
+
+        sockerr = ::bind (listener, (const struct sockaddr*)&addr, sizeof (addr));
+        assert (sockerr != SOCKET_ERROR);
+
+        sockerr = getsockname (listener, (struct sockaddr*)&addr, &addrlen);
+        assert (sockerr != SOCKET_ERROR);
+
+// Listen for incoming connections.
+        sockerr = listen (listener, 1);
+        assert (sockerr != SOCKET_ERROR);
+
+// Create the socket.
+        s[1] = WSASocket (AF_INET, SOCK_STREAM, 0, NULL, 0, 0);
+        assert (s[1] != INVALID_SOCKET);
+
+// Connect to the remote peer.
+        sockerr = connect (s[1], (struct sockaddr*)&addr, addrlen);
+/* Failure may be delayed from bind and may be due to socket exhaustion as explained
+ * in MSDN(bind Function).
+ */
+        assert (sockerr != SOCKET_ERROR);
+
+// Accept connection.
+        s[0] = accept (listener, NULL, NULL);
+        assert (s[0] != INVALID_SOCKET);
+
+// Set read-end to non-blocking mode
+        sockerr = ioctlsocket (s[0], FIONBIO, &one);
+        assert (sockerr != SOCKET_ERROR);
+
+// We don't need the listening socket anymore. Close it.
+        sockerr = closesocket (listener);
+        assert (sockerr != SOCKET_ERROR);
+
+	items[1].socket = nullptr;
+	items[1].fd     = s[0];
+	items[1].events = ZMQ_POLLIN;
+
+	rc = dispatcher.init();
+	CHECK(0 == rc);
+	event_queue_->registerNotificationClient (dispatcher, nullptr);
+
 /* Add shutdown handler. */
+	g_abort_sock = s[1];
 	::SetConsoleCtrlHandler ((PHANDLER_ROUTINE)::CtrlHandler, TRUE);
-	while (event_queue_->isActive()) {
-		event_queue_->dispatch (rfa::common::Dispatchable::InfiniteWait);
-	}
+
+	do {
+		int rc = zmq_poll (items, _countof (items), -1);
+		if (rc <= 0)
+			continue;
+		if (0 != (items[0].revents & ZMQ_POLLIN))
+			event_queue_->dispatch (rfa::common::Dispatchable::NoWait);
+	} while (0 == (items[1].revents & ZMQ_POLLIN));
+
 /* Remove shutdown handler. */
 	::SetConsoleCtrlHandler ((PHANDLER_ROUTINE)::CtrlHandler, FALSE);
+
+/* cleanup */
+	event_queue_->unregisterNotificationClient (dispatcher);
+
+	closesocket (s[0]);
+	closesocket (s[1]);
 }
 
 void
@@ -470,7 +582,7 @@ usagi::usagi_t::clear()
 			if ((bool)it->second && it->second->joinable()) {
 				zmq_msg_init_size (&msg, request.ByteSize());
 				request.SerializeToArray (zmq_msg_data (&msg), (int)zmq_msg_size (&msg));
-				zmq_send (abort_sock_.get(), &msg, 0);
+				zmq_send (worker_abort_sock_.get(), &msg, 0);
 				zmq_msg_close (&msg);
 				++active_threads;
 			}
@@ -480,13 +592,13 @@ usagi::usagi_t::clear()
 			for (auto it = workers_.begin(); it != workers_.end(); ++it) {
 				if ((bool)it->second && it->second->joinable())
 					it->second->join();
-				LOG(INFO) << "Thread #" << it->first->GetId() << "joined.";
+				LOG(INFO) << "Thread #" << it->first->GetId() << " joined.";
 				it->first.reset();
 			}
 		}
 		LOG(INFO) << "All worker threads joined.";
 	}
-	abort_sock_.reset();
+	worker_abort_sock_.reset();
 	zmq_context_.reset();
 
 /* Signal message pump thread to exit. */

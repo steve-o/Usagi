@@ -6,6 +6,7 @@
 
 #include <Common/Client.h>
 #include <Common/Context.h>
+#include <Common/DispatchableNotificationClient.h>
 #include <Common/EventQueue.h>
 #include <Common/RFA_String.h>
 #include <Common/StandardPrincipalIdentity.h>

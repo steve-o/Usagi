@@ -159,7 +159,7 @@ namespace usagi
 
 /* thread worker shutdown socket. */
 		std::shared_ptr<void> zmq_context_;
-		std::shared_ptr<void> abort_sock_;
+		std::shared_ptr<void> worker_abort_sock_;
 	};
 
 } /* namespace usagi */
