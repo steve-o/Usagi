@@ -160,6 +160,9 @@ namespace usagi
 /* thread worker shutdown socket. */
 		std::shared_ptr<void> zmq_context_;
 		std::shared_ptr<void> worker_abort_sock_;
+
+/* response socket for sending images. */
+		std::shared_ptr<void> sender_, receiver_;
 	};
 
 } /* namespace usagi */

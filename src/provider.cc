@@ -140,7 +140,7 @@ usagi::provider_t::init()
 		std::function<int(void*)> zmq_close_deleter = zmq_close;
 		sender_.reset (zmq_socket (zmq_context_.get(), ZMQ_PUSH), zmq_close_deleter);
 		CHECK((bool)sender_);
-		int rc = zmq_bind (sender_.get(), "inproc://usagi/refresh");
+		int rc = zmq_bind (sender_.get(), "inproc://usagi/rfa/request");
 		CHECK(0 == rc);
 	} catch (std::exception& e) {
 		LOG(ERROR) << "ZeroMQ::Exception: { "

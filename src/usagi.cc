@@ -106,10 +106,15 @@ protected:
 /* Setup 0mq sockets */
 			receiver_.reset (zmq_socket (context_.get(), ZMQ_PULL), zmq_close_deleter);
 			CHECK((bool)receiver_);
-			rc = zmq_connect (receiver_.get(), "inproc://usagi/refresh");
+			rc = zmq_connect (receiver_.get(), "inproc://usagi/rfa/request");
 			CHECK(0 == rc);
 /* Also bind for terminating interrupt. */
 			rc = zmq_connect (receiver_.get(), "inproc://usagi/worker/abort");
+			CHECK(0 == rc);
+/* Response image socket */
+			sender_.reset (zmq_socket (context_.get(), ZMQ_PUSH), zmq_close_deleter);
+			CHECK((bool)receiver_);
+			rc = zmq_connect (sender_.get(), "inproc://usagi/rfa/response");
 			CHECK(0 == rc);
 		} catch (std::exception& e) {
 			LOG(ERROR) << prefix_ << "ZeroMQ::Exception: { "
@@ -228,7 +233,7 @@ protected:
 		uint8_t validation_status = rfa::message::MsgValidationError;
 		try {
 			RFA_String warningText;
-			validation_status = response.validateMsg (&warningText);
+			validation_status = response_.validateMsg (&warningText);
 			if (rfa::message::MsgValidationWarning == validation_status)
 				LOG(ERROR) << prefix_ << "validateMsg: { \"warningText\": \"" << warningText << "\" }";
 		} catch (rfa::common::InvalidUsageException& e) {
@@ -239,8 +244,24 @@ protected:
 				" }";
 		}
 #endif
-
-		provider_->send (response_, request_token);
+		int rc;
+		uintptr_t token = reinterpret_cast<uintptr_t> (&request_token);
+		const rfa::common::Buffer& buffer = response_.getEncodedBuffer();
+/* part (a) - token */
+		rc = zmq_msg_init_size (&msg_, sizeof (token));		
+		CHECK(0 == rc);
+		memcpy (zmq_msg_data (&msg_), &token, sizeof (token));
+		rc = zmq_send (sender_.get(), &msg_, ZMQ_SNDMORE);
+		CHECK(0 == rc);
+		rc = zmq_msg_close (&msg_);
+		CHECK(0 == rc);
+/* part (b) - encoded buffer */
+		rc = zmq_msg_init_data (&msg_, const_cast<void*> (reinterpret_cast<const void*> (buffer.c_buf())), buffer.size(), nullptr, nullptr);
+		CHECK(0 == rc);
+		rc = zmq_send (sender_.get(), &msg_, 0);
+		CHECK(0 == rc);
+		rc = zmq_msg_close (&msg_);
+		CHECK(0 == rc);
 		LOG(INFO) << "Sent update.";
 	}
 	
@@ -253,6 +274,9 @@ protected:
 
 /* Socket to receive refresh requests on. */
 	std::shared_ptr<void> receiver_;
+
+/* response socket for sending images. */
+	std::shared_ptr<void> sender_;
 
 /* Incoming 0mq message */
 	zmq_msg_t msg_;
@@ -288,6 +312,13 @@ usagi::usagi_t::run ()
 		std::function<int(void*)> zmq_term_deleter = zmq_term;
 		zmq_context_.reset (zmq_init (0), zmq_term_deleter);
 		CHECK((bool)zmq_context_);
+
+/* pull for RFA submissions */
+		std::function<int(void*)> zmq_close_deleter = zmq_close;
+		receiver_.reset (zmq_socket (zmq_context_.get(), ZMQ_PULL), zmq_close_deleter);
+		CHECK((bool)receiver_);
+		int rc = zmq_bind (receiver_.get(), "inproc://usagi/rfa/response");
+		CHECK(0 == rc);
 	} catch (std::exception& e) {
 		LOG(ERROR) << "ZeroMQ::Exception: { "
 			"\"What\": \"" << e.what() << "\" }";
@@ -451,9 +482,12 @@ public:
 	void notify (rfa::common::Dispatchable& eventSource, void* closure) override
 	{
 		DCHECK((bool)sender_);
-		zmq_msg_init_size (&msg_, 0);
-		zmq_send (sender_.get(), &msg_, 0);
-		zmq_msg_close (&msg_);		
+		int rc = zmq_msg_init_size (&msg_, 0);
+		CHECK(0 == rc);
+		rc = zmq_send (sender_.get(), &msg_, 0);
+		CHECK(0 == rc);
+		rc = zmq_msg_close (&msg_);
+		CHECK(0 == rc);
 	}
 
 protected:
@@ -467,17 +501,24 @@ usagi::usagi_t::mainLoop()
 {
 	std::function<int(void*)> zmq_close_deleter = zmq_close;
 	rfa_dispatcher_t dispatcher (zmq_context_);
-	zmq_pollitem_t items[2];
+	zmq_pollitem_t items[3];
 	SOCKET s[2];
-	std::shared_ptr<void> rfa_receiver;
+	std::shared_ptr<void> event_sock;
+	zmq_msg_t msg;
+	rfa::message::RespMsg response (false);
+	rfa::sessionLayer::RequestToken* request_token;
 
 /* pull RFA events */
-	rfa_receiver.reset (zmq_socket (zmq_context_.get(), ZMQ_PULL), zmq_close_deleter);
-	CHECK((bool)rfa_receiver);
-	int rc = zmq_bind (rfa_receiver.get(), "inproc://usagi/rfa/event");
+	event_sock.reset (zmq_socket (zmq_context_.get(), ZMQ_PULL), zmq_close_deleter);
+	CHECK((bool)event_sock);
+	int rc = zmq_bind (event_sock.get(), "inproc://usagi/rfa/event");
 	CHECK(0 == rc);
-	items[0].socket = rfa_receiver.get();
+	items[0].socket = event_sock.get();
 	items[0].events = ZMQ_POLLIN;
+
+/* pull RFA submissions */
+	items[1].socket = receiver_.get();
+	items[1].events = ZMQ_POLLIN;
 
 /* pull abort event */
 /* use loopback sockets to simulate a pipe suitable for win32/select() */
@@ -530,9 +571,9 @@ usagi::usagi_t::mainLoop()
         sockerr = closesocket (listener);
         assert (sockerr != SOCKET_ERROR);
 
-	items[1].socket = nullptr;
-	items[1].fd     = s[0];
-	items[1].events = ZMQ_POLLIN;
+	items[2].socket = nullptr;
+	items[2].fd     = s[0];
+	items[2].events = ZMQ_POLLIN;
 
 	rc = dispatcher.init();
 	CHECK(0 == rc);
@@ -546,9 +587,56 @@ usagi::usagi_t::mainLoop()
 		int rc = zmq_poll (items, _countof (items), -1);
 		if (rc <= 0)
 			continue;
+/* #0 - RFA event */
 		if (0 != (items[0].revents & ZMQ_POLLIN))
 			event_queue_->dispatch (rfa::common::Dispatchable::NoWait);
-	} while (0 == (items[1].revents & ZMQ_POLLIN));
+/* #1 - RFA response */
+		if (0 != (items[1].revents & ZMQ_POLLIN))
+		{
+/* part (a) - token */
+			rc = zmq_msg_init (&msg);
+			CHECK(0 == rc);
+			rc = zmq_recv (receiver_.get(), &msg, 0);
+			CHECK(0 == rc);
+			if (logging::DEBUG_MODE) {
+				int64_t more;
+				size_t more_size = sizeof (more);
+				rc = zmq_getsockopt (receiver_.get(), ZMQ_RCVMORE, &more, &more_size);
+				CHECK (rc == 0);
+				CHECK (more == 1);
+			}
+			uintptr_t token = 0;
+			CHECK(sizeof (token) == zmq_msg_size (&msg));
+			memcpy (&token, zmq_msg_data (&msg), sizeof (token));
+			request_token = reinterpret_cast<rfa::sessionLayer::RequestToken*> (token);
+			rc = zmq_msg_close (&msg);
+			CHECK(0 == rc);
+/* part (b) - encoded buffer */
+			rc = zmq_msg_init (&msg);
+			CHECK(0 == rc);
+			rc = zmq_recv (receiver_.get(), &msg, 0);
+			CHECK(0 == rc);
+			if (logging::DEBUG_MODE) {
+				int64_t more;
+				size_t more_size = sizeof (more);
+				rc = zmq_getsockopt (receiver_.get(), ZMQ_RCVMORE, &more, &more_size);
+				CHECK (rc == 0);
+				CHECK (more == 0);
+			}
+			rfa::common::Buffer buffer (reinterpret_cast<unsigned char*> (zmq_msg_data (&msg)), (int)zmq_msg_size (&msg), (int)zmq_msg_size (&msg), false);
+			try {
+				response.setEncodedBuffer (buffer);
+				provider_->send (response, *request_token);
+			} catch (rfa::common::InvalidUsageException& e) {
+				LOG(ERROR) << "EncodedBuffer::InvalidUsageException: { " <<
+						"\"StatusText\": \"" << e.getStatus().getStatusText() << "\""
+						" }";
+			}
+			rc = zmq_msg_close (&msg);
+			CHECK(0 == rc);
+		}
+/* #2 - Abort request */
+	} while (0 == (items[2].revents & ZMQ_POLLIN));
 
 /* Remove shutdown handler. */
 	::SetConsoleCtrlHandler ((PHANDLER_ROUTINE)::CtrlHandler, FALSE);
@@ -599,6 +687,8 @@ usagi::usagi_t::clear()
 		LOG(INFO) << "All worker threads joined.";
 	}
 	worker_abort_sock_.reset();
+	sender_.reset();
+	receiver_.reset();
 	zmq_context_.reset();
 
 /* Signal message pump thread to exit. */
