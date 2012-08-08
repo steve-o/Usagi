@@ -43,71 +43,124 @@ public:
 		context_ (context),
 		id_ (id)
 	{
+/* Set logger ID */
+		std::ostringstream ss;
+		ss << id << ':';
+		prefix_.assign (ss.str());
 	}
 
 	void operator()()
 	{
 		provider::Request request;
-		zmq_msg_t msg;
-		int rc;
 
-		std::function<int(void*)> zmq_close_deleter = zmq_close;
-/* Socket to receive refresh requests on. */
-		std::shared_ptr<void> receiver;
-		receiver.reset (zmq_socket (context_.get(), ZMQ_PULL), zmq_close_deleter);
-		CHECK((bool)receiver);
-		rc = zmq_connect (receiver.get(), "inproc://usagi/refresh");
-		CHECK(0 == rc);
-/* Also bind for terminating interrupt. */
-		rc = zmq_connect (receiver.get(), "inproc://usagi/abort");
-		CHECK(0 == rc);
+		Init();
+		LOG(INFO) << prefix_ << "Accepting requests.";
 
-		LOG(INFO) << "Thread #" << id_ << ": Accepting refresh requests.";
-
-		while (true) {
-/* Receive new request. */
-			rc = zmq_msg_init (&msg);
-			CHECK(0 == rc);
-			LOG(INFO) << "Thread #" << id_ << ": Awaiting new job.";
-			rc = zmq_recv (receiver.get(), &msg, 0);
-			CHECK(0 == rc);
-			if (!request.ParseFromArray (zmq_msg_data (&msg), (int)zmq_msg_size (&msg))) {
-				LOG(ERROR) << "Thread #" << id_ << ": Received invalid request.";
-				rc = zmq_msg_close (&msg);
-				CHECK(0 == rc);
+		while (true)
+		{
+			if (!GetRequest (&request))
 				continue;
-			}
 			if (request.msg_type() == provider::Request::MSG_ABORT) {
-				LOG(ERROR) << "Thread #" << id_ << ": Received interrupt request.";
+				LOG(INFO) << prefix_ << "Received interrupt request.";
 				break;
 			}
 			if (!(request.msg_type() == provider::Request::MSG_REFRESH
 				&& request.has_refresh()))
 			{
-				LOG(ERROR) << "Thread #" << id_ << ": Received unknown request.";
+				LOG(ERROR) << prefix_ << "Received unknown request.";
 				continue;
 			}
-			LOG(INFO) << "Thread #" << id_ << ": Received request \"" << request.refresh().item_name() << "\"";
-			LOG(INFO) << request.DebugString();
-			rc = zmq_msg_close (&msg);
-			CHECK(0 == rc);
+			VLOG(1) << prefix_ << "Received request \"" << request.refresh().item_name() << "\"";
+			DVLOG(1) << prefix_ << request.DebugString();
 
-/* forward to main application */
-			rfa::sessionLayer::RequestToken* request_token = reinterpret_cast<rfa::sessionLayer::RequestToken*> ((uintptr_t)request.refresh().token());
-			const uint32_t service_id = request.refresh().service_id();
-			const uint8_t model_type = request.refresh().model_type();
-			const char* name_c = request.refresh().item_name().c_str();
-			const uint8_t rwf_major_version = request.refresh().rwf_major_version();
-			const uint8_t rwf_minor_version = request.refresh().rwf_minor_version();
-			usagi_.processRefreshRequest (*request_token, service_id, model_type, name_c, rwf_major_version, rwf_minor_version);
+			try {
+				ProcessRequest (*reinterpret_cast<rfa::sessionLayer::RequestToken*> ((uintptr_t)request.refresh().token()),
+						request.refresh().service_id(),
+						request.refresh().model_type(),
+						request.refresh().item_name().c_str(),
+						request.refresh().rwf_major_version(),
+						request.refresh().rwf_minor_version());
+			} catch (std::exception& e) {
+				LOG(ERROR) << prefix_ << "ProcessRequest::Exception: { "
+					"\"What\": \"" << e.what() << "\""
+					" }";
+			}
 		}
 
-		LOG(INFO) << "Thread #" << id_ << ": Worker closed.";
+		LOG(INFO) << prefix_ << "Worker closed.";
 	}
 
+	unsigned GetId() const { return id_; }
+
 protected:
+	void Init()
+	{
+		std::function<int(void*)> zmq_close_deleter = zmq_close;
+		int rc;
+
+		try {
+/* Setup 0mq sockets */
+			receiver_.reset (zmq_socket (context_.get(), ZMQ_PULL), zmq_close_deleter);
+			CHECK((bool)receiver_);
+			rc = zmq_connect (receiver_.get(), "inproc://usagi/refresh");
+			CHECK(0 == rc);
+/* Also bind for terminating interrupt. */
+			rc = zmq_connect (receiver_.get(), "inproc://usagi/abort");
+			CHECK(0 == rc);
+		} catch (std::exception& e) {
+			LOG(ERROR) << prefix_ << "ZeroMQ::Exception: { "
+				"\"What\": \"" << e.what() << "\""
+				" }";
+		}
+	}
+
+	bool GetRequest (provider::Request* request)
+	{
+		int rc;
+
+		rc = zmq_msg_init (&msg_);
+		CHECK(0 == rc);
+		VLOG(1) << prefix_ << "Awaiting new job.";
+		rc = zmq_recv (receiver_.get(), &msg_, 0);
+		CHECK(0 == rc);
+		if (!request->ParseFromArray (zmq_msg_data (&msg_), (int)zmq_msg_size (&msg_))) {
+			LOG(ERROR) << prefix_ << "Received invalid request.";
+			rc = zmq_msg_close (&msg_);
+			CHECK(0 == rc);
+			return false;
+		}
+		rc = zmq_msg_close (&msg_);
+		CHECK(0 == rc);
+		return true;
+	}
+
+	void ProcessRequest (
+		rfa::sessionLayer::RequestToken& request_token,
+		uint32_t service_id,
+		uint8_t model_type,
+		const char* item_name,
+		uint8_t rwf_major_version,
+		uint8_t rwf_minor_version
+		)
+	{
+/* forward to main application. */
+		usagi_.processRequest (request_token, service_id, model_type, item_name, rwf_major_version, rwf_minor_version);
+	}
+	
+/* worker unique identifier */
 	const unsigned id_;
+	std::string prefix_;
+
+/* 0mq context */
 	std::shared_ptr<void> context_;
+
+/* Socket to receive refresh requests on. */
+	std::shared_ptr<void> receiver_;
+
+/* Incoming 0mq message */
+	zmq_msg_t msg_;
+
+/* application reference */
 	usagi_t& usagi_;
 };
 
@@ -366,7 +419,7 @@ usagi::usagi_t::processTimer (
 
 /* Refresh request entry point. */
 void
-usagi::usagi_t::processRefreshRequest (
+usagi::usagi_t::processRequest (
 	rfa::sessionLayer::RequestToken& request_token,
 	uint32_t service_id,
 	uint8_t model_type,

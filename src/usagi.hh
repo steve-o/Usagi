@@ -102,7 +102,7 @@ namespace usagi
 	class request_base_t
 	{
 	public:
-		virtual void processRefreshRequest (rfa::sessionLayer::RequestToken& token, uint32_t service_id, uint8_t model_type, const char* name, uint8_t rwf_major_version, uint8_t rwf_minor_version) = 0;
+		virtual void processRequest (rfa::sessionLayer::RequestToken& token, uint32_t service_id, uint8_t model_type, const char* name, uint8_t rwf_major_version, uint8_t rwf_minor_version) = 0;
 	};
 
 	class usagi_t :
@@ -124,7 +124,7 @@ namespace usagi
 		bool processTimer (const boost::chrono::time_point<boost::chrono::system_clock>& t) override;
 
 /* Refresh request entry point. */
-		void processRefreshRequest (rfa::sessionLayer::RequestToken& token, uint32_t service_id, uint8_t model_type, const char* name, uint8_t rwf_major_version, uint8_t rwf_minor_version) override;
+		void processRequest (rfa::sessionLayer::RequestToken& token, uint32_t service_id, uint8_t model_type, const char* name, uint8_t rwf_major_version, uint8_t rwf_minor_version) override;
 
 	private:
 
