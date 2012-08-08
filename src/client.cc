@@ -650,6 +650,8 @@ usagi::client_t::processItemRequest (
 				request.mutable_refresh()->set_service_id (service_id);
 				request.mutable_refresh()->set_model_type (model_type);
 				request.mutable_refresh()->set_item_name (item_name, item_name_len);
+				request.mutable_refresh()->set_rwf_major_version (rwf_major_version_);
+				request.mutable_refresh()->set_rwf_minor_version (rwf_minor_version_);
 				zmq_msg_init_size (&msg, request.ByteSize());
 				request.SerializeToArray (zmq_msg_data (&msg), (int)zmq_msg_size (&msg));
 				zmq_send (sender_.get(), &msg, 0);
@@ -709,6 +711,8 @@ usagi::client_t::processItemRequest (
 				request.mutable_refresh()->set_service_id (service_id);
 				request.mutable_refresh()->set_model_type (model_type);
 				request.mutable_refresh()->set_item_name (item_name, item_name_len);
+				request.mutable_refresh()->set_rwf_major_version (rwf_major_version_);
+				request.mutable_refresh()->set_rwf_minor_version (rwf_minor_version_);
 				zmq_msg_init_size (&msg, request.ByteSize());
 				request.SerializeToArray (zmq_msg_data (&msg), (int)zmq_msg_size (&msg));
 				zmq_send (sender_.get(), &msg, 0);

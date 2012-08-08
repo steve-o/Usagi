@@ -11,5 +11,7 @@ message Request {
 		required uint32 service_id = 4;
 		required uint32 model_type = 5;
 		required string item_name = 6;
+		required uint32 rwf_major_version = 7;
+		required uint32 rwf_minor_version = 8;
 	}
 }

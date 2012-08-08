@@ -97,7 +97,9 @@ public:
 			const uint32_t service_id = request.refresh().service_id();
 			const uint8_t model_type = request.refresh().model_type();
 			const char* name_c = request.refresh().item_name().c_str();
-			usagi_.processRefreshRequest (*request_token, service_id, model_type, name_c);
+			const uint8_t rwf_major_version = request.refresh().rwf_major_version();
+			const uint8_t rwf_minor_version = request.refresh().rwf_minor_version();
+			usagi_.processRefreshRequest (*request_token, service_id, model_type, name_c, rwf_major_version, rwf_minor_version);
 		}
 
 		LOG(INFO) << "Thread #" << id_ << ": Worker closed.";
@@ -368,7 +370,9 @@ usagi::usagi_t::processRefreshRequest (
 	rfa::sessionLayer::RequestToken& request_token,
 	uint32_t service_id,
 	uint8_t model_type,
-	const char* name_c
+	const char* name_c,
+	uint8_t rwf_major_version,
+	uint8_t rwf_minor_version
 	)
 {
 	VLOG(2) << "Sending blank response to incoming refresh request: { "
@@ -376,6 +380,8 @@ usagi::usagi_t::processRefreshRequest (
 		", \"ServiceID\": " << service_id <<
 		", \"MsgModelType\": " << (int)model_type <<
 		", \"Name\": \"" << name_c << "\""
+		", \"RwfMajorVersion\": " << (int)rwf_major_version <<
+		", \"RwfMinorVersion\": " << (int)rwf_minor_version <<
 		" }";
 /* 7.5.9.1 Create a response message (4.2.2) */
 	rfa::message::RespMsg response (false);	/* reference */
@@ -396,8 +402,7 @@ usagi::usagi_t::processRefreshRequest (
 
 /* 4.3.1 RespMsg.Payload */
 // not std::map :(  derived from rfa::common::Data
-	const uint16_t rwf_version = provider_->getRwfVersion();
-	fields_.setAssociatedMetaInfo (rwf_version / 256, rwf_version % 256);
+	fields_.setAssociatedMetaInfo (rwf_major_version, rwf_minor_version);
 	fields_.setInfo (kDictionaryId, kFieldListId);
 
 /* Clear required for SingleWriteIterator state machine. */
