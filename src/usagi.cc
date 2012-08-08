@@ -56,7 +56,7 @@ public:
 		std::shared_ptr<void> receiver;
 		receiver.reset (zmq_socket (context_.get(), ZMQ_PULL), zmq_close_deleter);
 		CHECK((bool)receiver);
-		rc = zmq_bind (receiver.get(), "inproc://usagi/refresh");
+		rc = zmq_connect (receiver.get(), "inproc://usagi/refresh");
 		CHECK(0 == rc);
 /* Also bind for terminating interrupt. */
 		rc = zmq_connect (receiver.get(), "inproc://usagi/abort");

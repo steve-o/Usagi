@@ -189,6 +189,7 @@ namespace usagi
 
 /* RFA request thread client. */
 		std::shared_ptr<void> zmq_context_;
+		std::shared_ptr<void> sender_;
 
 /** Performance Counters **/
 		boost::posix_time::ptime creation_time_, last_activity_;

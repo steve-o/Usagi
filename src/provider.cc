@@ -10,6 +10,9 @@
 
 #include <windows.h>
 
+/* ZeroMQ messaging middleware. */
+#include <zmq.h>
+
 #include "chromium/logging.hh"
 #include "error.hh"
 #include "rfaostream.hh"
@@ -132,6 +135,18 @@ usagi::provider_t::init()
 	if (nullptr == error_item_handle_)
 		return false;
 
+/* create new push socket for submitting refresh requests. */
+	try {
+		std::function<int(void*)> zmq_close_deleter = zmq_close;
+		sender_.reset (zmq_socket (zmq_context_.get(), ZMQ_PUSH), zmq_close_deleter);
+		CHECK((bool)sender_);
+		int rc = zmq_bind (sender_.get(), "inproc://usagi/refresh");
+		CHECK(0 == rc);
+	} catch (std::exception& e) {
+		LOG(ERROR) << "ZeroMQ::Exception: { "
+			"\"What\": \"" << e.what() << "\" }";
+		return false;
+	}
 	return true;
 }
 
@@ -175,7 +190,7 @@ usagi::provider_t::send (
 	{
 		if (request.second->is_muted || request.second->use_attribinfo_in_updates)
 			return;
-		send (static_cast<rfa::common::Msg&> (msg), *(request.first), nullptr);
+		this->send (static_cast<rfa::common::Msg&> (msg), *(request.first), nullptr);
 		auto client = request.second->client.lock();
 		if ((bool)client) {
 			client->cumulative_stats_[CLIENT_PC_RFA_MSGS_SENT]++;
@@ -192,7 +207,7 @@ usagi::provider_t::send (
 		{
 			if (request.second->is_muted || !request.second->use_attribinfo_in_updates)
 				return;
-			send (static_cast<rfa::common::Msg&> (msg), *(request.first), nullptr);
+			this->send (static_cast<rfa::common::Msg&> (msg), *(request.first), nullptr);
 			auto client = request.second->client.lock();
 			if ((bool)client) {
 				client->cumulative_stats_[CLIENT_PC_RFA_MSGS_SENT]++;
@@ -377,7 +392,7 @@ usagi::provider_t::acceptClientSession (
 	auto registered_handle = omm_provider_->registerClient (event_queue_.get(), &ommClientSessionIntSpec, *static_cast<rfa::common::Client*> (client.get()), nullptr /* closure */);
 	if (nullptr == registered_handle)
 		return false;
-	if (!client->init (registered_handle, zmq_context_))
+	if (!client->init (registered_handle, sender_))
 		return false;
 	if (!client->getAssociatedMetaInfo()) {
 		omm_provider_->unregisterClient (registered_handle);
