@@ -65,7 +65,7 @@ public:
 		zmq_context_.reset();
 	}
 
-	void operator()()
+	void Run (void)
 	{
 		Init();
 		LOG(INFO) << prefix_ << "Accepting requests.";
@@ -107,7 +107,7 @@ public:
 	unsigned GetId() const { return id_; }
 
 protected:
-	void Init()
+	void Init (void)
 	{
 		std::function<int(void*)> zmq_close_deleter = zmq_close;
 		int rc;
@@ -403,7 +403,7 @@ usagi::usagi_t::Run ()
 			auto worker = std::make_shared<worker_t> (provider_, config_, zmq_context_, worker_id);
 			if (!(bool)worker)
 				goto cleanup;
-			auto thread = std::make_shared<boost::thread> (*worker.get());
+			auto thread = std::make_shared<boost::thread> ([worker](){ worker->Run(); });
 			if (!(bool)thread)
 				goto cleanup;
 			workers_.emplace_front (std::make_pair (worker, thread));
