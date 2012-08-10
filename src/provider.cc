@@ -200,38 +200,40 @@ usagi::provider_t::Send (
 	unsigned i = 0;
 	boost::shared_lock<boost::shared_mutex> stream_lock (stream.lock);
 	const auto now = boost::posix_time::second_clock::universal_time();
-	const rfa::common::Buffer& buffer = response_msg.getEncodedBuffer();
 	provider::Response response;
 	zmq_msg_t msg;
 
 	response.set_msg_type (provider::Response::MSG_UPDATE);
-/* first iteration without AttribInfo */
-	std::for_each (stream.requests.begin(), stream.requests.end(),
-		[&](std::pair<rfa::sessionLayer::RequestToken*const, std::shared_ptr<request_t>>& request)
 	{
-		if (!request.second->has_initial_image.load() || request.second->use_attribinfo_in_updates)
-			return;
+/* first iteration without AttribInfo */
+		const rfa::common::Buffer& buffer = response_msg.getEncodedBuffer();
+		std::for_each (stream.requests.begin(), stream.requests.end(),
+			[&](std::pair<rfa::sessionLayer::RequestToken*const, std::shared_ptr<request_t>>& request)
+		{
+			if (!request.second->has_initial_image.load() || request.second->use_attribinfo_in_updates)
+				return;
 /* pack into 0mq message. */
-		response.set_token (reinterpret_cast<uintptr_t> (request.first));
-		response.set_encoded_buffer (buffer.c_buf(), buffer.size());
-		int rc = zmq_msg_init_size (&msg, response.ByteSize());
-		CHECK(0 == rc);
-		response.SerializeToArray (zmq_msg_data (&msg), static_cast<int> (zmq_msg_size (&msg)));
-		rc = zmq_send (response_sock_.get(), &msg, 0);
-		CHECK(0 == rc);
-		rc = zmq_msg_close (&msg);
-		CHECK(0 == rc);
+			response.set_token (reinterpret_cast<uintptr_t> (request.first));
+			response.set_encoded_buffer (buffer.c_buf(), buffer.size());
+			int rc = zmq_msg_init_size (&msg, response.ByteSize());
+			CHECK(0 == rc);
+			response.SerializeToArray (zmq_msg_data (&msg), static_cast<int> (zmq_msg_size (&msg)));
+			rc = zmq_send (response_sock_.get(), &msg, 0);
+			CHECK(0 == rc);
+			rc = zmq_msg_close (&msg);
+			CHECK(0 == rc);
 /* update client send statistics. */
-		auto client = request.second->client.lock();
-		if ((bool)client) {
-			client->cumulative_stats_[CLIENT_PC_RFA_MSGS_SENT]++;
-			client->last_activity_ = now;
-		}
-		++i;
-	});
-/* second iteration with AttribInfo */
+			auto client = request.second->client.lock();
+			if ((bool)client) {
+				client->cumulative_stats_[CLIENT_PC_RFA_MSGS_SENT]++;
+				client->last_activity_ = now;
+			}
+			++i;
+		});
+	}
 	if (i < stream.requests.size())
 	{
+/* second iteration with AttribInfo */
 		response_msg.setAttribInfo (attribInfo);
 /* re-encode */
 		const rfa::common::Buffer& buffer = response_msg.getEncodedBuffer();
