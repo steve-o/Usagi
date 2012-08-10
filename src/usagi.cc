@@ -65,11 +65,57 @@ public:
 		zmq_context_.reset();
 	}
 
+	bool Init (void)
+	{
+		std::function<int(void*)> zmq_close_deleter = zmq_close;
+		int rc;
+
+		try {
+/* Setup 0mq sockets */
+			request_sock_.reset (zmq_socket (zmq_context_.get(), ZMQ_PULL), zmq_close_deleter);
+			CHECK((bool)request_sock_);
+			rc = zmq_connect (request_sock_.get(), "inproc://usagi/rfa/request");
+			CHECK(0 == rc);
+/* Also bind for terminating interrupt. */
+			rc = zmq_connect (request_sock_.get(), "inproc://usagi/worker/abort");
+			CHECK(0 == rc);
+/* Response image socket */
+			response_sock_.reset (zmq_socket (zmq_context_.get(), ZMQ_PUSH), zmq_close_deleter);
+			CHECK((bool)response_sock_);
+			rc = zmq_connect (response_sock_.get(), "inproc://usagi/rfa/response");
+			CHECK(0 == rc);
+		} catch (std::exception& e) {
+			LOG(ERROR) << prefix_ << "ZeroMQ::Exception: { "
+				"\"What\": \"" << e.what() << "\""
+				" }";
+			return false;
+		}
+
+		try {
+/* Pre-allocate memory buffer for RFA payload iterator */
+			fields_ = std::make_shared<rfa::data::FieldList> ();
+			CHECK ((bool)fields_);
+			fields_->setInfo (kDictionaryId, kFieldListId);
+
+			CHECK (config_.maximum_data_size > 0);
+			single_write_it_ = std::make_shared<rfa::data::SingleWriteIterator> ();
+			CHECK ((bool)single_write_it_);
+			single_write_it_->initialize (*fields_.get(), static_cast<int> (config_.maximum_data_size));
+			CHECK (single_write_it_->isInitialized());
+		} catch (rfa::common::InvalidUsageException& e) {
+			LOG(ERROR) << prefix_ << "InvalidUsageException: { "
+				  "\"Severity\": \"" << severity_string (e.getSeverity()) << "\""
+				", \"Classification\": \"" << classification_string (e.getClassification()) << "\""
+				", \"StatusText\": \"" << e.getStatus().getStatusText() << "\""
+				" }";
+			return false;
+		}
+		return true;
+	}
+
 	void Run (void)
 	{
-		Init();
 		LOG(INFO) << prefix_ << "Accepting requests.";
-
 		while (true)
 		{
 			if (!GetRequest (&request_))
@@ -107,51 +153,6 @@ public:
 	unsigned GetId() const { return id_; }
 
 protected:
-	void Init (void)
-	{
-		std::function<int(void*)> zmq_close_deleter = zmq_close;
-		int rc;
-
-		try {
-/* Setup 0mq sockets */
-			request_sock_.reset (zmq_socket (zmq_context_.get(), ZMQ_PULL), zmq_close_deleter);
-			CHECK((bool)request_sock_);
-			rc = zmq_connect (request_sock_.get(), "inproc://usagi/rfa/request");
-			CHECK(0 == rc);
-/* Also bind for terminating interrupt. */
-			rc = zmq_connect (request_sock_.get(), "inproc://usagi/worker/abort");
-			CHECK(0 == rc);
-/* Response image socket */
-			response_sock_.reset (zmq_socket (zmq_context_.get(), ZMQ_PUSH), zmq_close_deleter);
-			CHECK((bool)response_sock_);
-			rc = zmq_connect (response_sock_.get(), "inproc://usagi/rfa/response");
-			CHECK(0 == rc);
-		} catch (std::exception& e) {
-			LOG(ERROR) << prefix_ << "ZeroMQ::Exception: { "
-				"\"What\": \"" << e.what() << "\""
-				" }";
-		}
-
-		try {
-/* Pre-allocate memory buffer for RFA payload iterator */
-			fields_ = std::make_shared<rfa::data::FieldList> ();
-			CHECK ((bool)fields_);
-			fields_->setInfo (kDictionaryId, kFieldListId);
-
-			CHECK (config_.maximum_data_size > 0);
-			single_write_it_ = std::make_shared<rfa::data::SingleWriteIterator> ();
-			CHECK ((bool)single_write_it_);
-			single_write_it_->initialize (*fields_.get(), static_cast<int> (config_.maximum_data_size));
-			CHECK (single_write_it_->isInitialized());
-		} catch (rfa::common::InvalidUsageException& e) {
-			LOG(ERROR) << prefix_ << "InvalidUsageException: { "
-				  "\"Severity\": \"" << severity_string (e.getSeverity()) << "\""
-				", \"Classification\": \"" << classification_string (e.getClassification()) << "\""
-				", \"StatusText\": \"" << e.getStatus().getStatusText() << "\""
-				" }";
-		}
-	}
-
 	bool GetRequest (provider::Request* request)
 	{
 		int rc;
@@ -403,7 +404,7 @@ usagi::usagi_t::Run ()
 			auto worker = std::make_shared<worker_t> (provider_, config_, zmq_context_, worker_id);
 			if (!(bool)worker)
 				goto cleanup;
-			auto thread = std::make_shared<boost::thread> ([worker](){ worker->Run(); });
+			auto thread = std::make_shared<boost::thread> ([worker](){ if (worker->Init()) worker->Run(); });
 			if (!(bool)thread)
 				goto cleanup;
 			workers_.emplace_front (std::make_pair (worker, thread));
