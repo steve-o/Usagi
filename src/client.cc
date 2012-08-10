@@ -30,7 +30,6 @@ usagi::client_t::client_t (
 	login_token_ (nullptr),
 	rwf_major_version_ (0),
 	rwf_minor_version_ (0),
-	is_muted_ (true),
 	is_logged_in_ (false)
 {
 	ZeroMemory (cumulative_stats_, sizeof (cumulative_stats_));
@@ -54,38 +53,37 @@ usagi::client_t::~client_t()
 }
 
 bool
-usagi::client_t::init (
-	rfa::common::Handle*const handle,
-	std::shared_ptr<void> sender
+usagi::client_t::Init (
+	rfa::common::Handle*const handle
 	)
 {
 /* save non-const client session handle. */
 	handle_ = handle;
-/* zmq send socket for forwarding image requests. */
-	sender_ = sender;
 	return true;
 }
 
 bool
-usagi::client_t::getAssociatedMetaInfo()
+usagi::client_t::GetAssociatedMetaInfo()
 {
 	DCHECK(nullptr != handle_);
 
 	last_activity_ = boost::posix_time::second_clock::universal_time();
 
 /* Store negotiated Reuters Wire Format version information. */
-	rfa::data::Map map;
+	auto& map = provider_.map_;
 	map.setAssociatedMetaInfo (*handle_);
 	rwf_major_version_ = map.getMajorVersion();
 	rwf_minor_version_ = map.getMinorVersion();
 	LOG(INFO) << prefix_ <<
 		"RWF: { "
-		  "\"MajorVersion\": " << (unsigned)rwf_major_version_ <<
-		", \"MinorVersion\": " << (unsigned)rwf_minor_version_ <<
+		  "\"MajorVersion\": " << (unsigned)GetRwfMajorVersion() <<
+		", \"MinorVersion\": " << (unsigned)GetRwfMinorVersion() <<
 		" }";
 	return true;
 }
 
+/* RFA callback entry point.
+ */
 void
 usagi::client_t::processEvent (
 	const rfa::common::Event& event_
@@ -96,11 +94,11 @@ usagi::client_t::processEvent (
 	last_activity_ = boost::posix_time::second_clock::universal_time();
 	switch (event_.getType()) {
 	case rfa::sessionLayer::OMMSolicitedItemEventEnum:
-		processOMMSolicitedItemEvent (static_cast<const rfa::sessionLayer::OMMSolicitedItemEvent&>(event_));
+		OnOMMSolicitedItemEvent (static_cast<const rfa::sessionLayer::OMMSolicitedItemEvent&>(event_));
 		break;
 
 	case rfa::sessionLayer::OMMInactiveClientSessionEventEnum:
-		processOMMInactiveClientSessionEvent(static_cast<const rfa::sessionLayer::OMMInactiveClientSessionEvent&>(event_));
+		OnOMMInactiveClientSessionEvent(static_cast<const rfa::sessionLayer::OMMInactiveClientSessionEvent&>(event_));
 		break;
 
         default:
@@ -113,7 +111,7 @@ usagi::client_t::processEvent (
 /* 7.4.7.2 Handling consumer solicited item events.
  */
 void
-usagi::client_t::processOMMSolicitedItemEvent (
+usagi::client_t::OnOMMSolicitedItemEvent (
 	const rfa::sessionLayer::OMMSolicitedItemEvent&	item_event
 	)
 {
@@ -128,7 +126,7 @@ usagi::client_t::processOMMSolicitedItemEvent (
 
 	switch (msg.getMsgType()) {
 	case rfa::message::ReqMsgEnum:
-		processReqMsg (static_cast<const rfa::message::ReqMsg&>(msg), item_event.getRequestToken());
+		OnReqMsg (static_cast<const rfa::message::ReqMsg&>(msg), item_event.getRequestToken());
 		break;
 	default:
 		cumulative_stats_[CLIENT_PC_OMM_SOLICITED_ITEM_EVENTS_DISCARDED]++;
@@ -138,7 +136,7 @@ usagi::client_t::processOMMSolicitedItemEvent (
 }
 
 void
-usagi::client_t::processReqMsg (
+usagi::client_t::OnReqMsg (
 	const rfa::message::ReqMsg& request_msg,
 	rfa::sessionLayer::RequestToken& request_token
 	)
@@ -146,20 +144,20 @@ usagi::client_t::processReqMsg (
 	cumulative_stats_[CLIENT_PC_REQUEST_MSGS_RECEIVED]++;
 	switch (request_msg.getMsgModelType()) {
 	case rfa::rdm::MMT_LOGIN:
-		processLoginRequest (request_msg, request_token);
+		OnLoginRequest (request_msg, request_token);
 		break;
 	case rfa::rdm::MMT_DIRECTORY:
-		processDirectoryRequest (request_msg, request_token);
+		OnDirectoryRequest (request_msg, request_token);
 		break;
 	case rfa::rdm::MMT_DICTIONARY:
-		processDictionaryRequest (request_msg, request_token);
+		OnDictionaryRequest (request_msg, request_token);
 		break;
 	case rfa::rdm::MMT_MARKET_PRICE:
 	case rfa::rdm::MMT_MARKET_BY_ORDER:
 	case rfa::rdm::MMT_MARKET_BY_PRICE:
 	case rfa::rdm::MMT_MARKET_MAKER:
 	case rfa::rdm::MMT_SYMBOL_LIST:
-		processItemRequest (request_msg, request_token);
+		OnItemRequest (request_msg, request_token);
 		break;
 	default:
 		cumulative_stats_[CLIENT_PC_REQUEST_MSGS_DISCARDED]++;
@@ -187,7 +185,7 @@ usagi::client_t::processReqMsg (
  * RDM 3.4.4 Authentication: multiple logins per client session are not supported.
  */
 void
-usagi::client_t::processLoginRequest (
+usagi::client_t::OnLoginRequest (
 	const rfa::message::ReqMsg& login_msg,
 	rfa::sessionLayer::RequestToken& login_token
 	)
@@ -220,7 +218,7 @@ usagi::client_t::processLoginRequest (
 		if (rfa::message::MsgValidationError == validation_status) 
 		{
 			LOG(WARNING) << prefix_ << "Rejecting MMT_LOGIN as RFA validation failed.";
-			rejectLogin (login_msg, login_token);
+			RejectLogin (login_msg, login_token);
 			return;
 		}
 
@@ -243,11 +241,11 @@ usagi::client_t::processLoginRequest (
 		{
 			cumulative_stats_[CLIENT_PC_MMT_LOGIN_MALFORMED]++;
 			LOG(WARNING) << prefix_ << "Rejecting MMT_LOGIN as RDM validation failed: " << login_msg;
-			rejectLogin (login_msg, login_token);
+			RejectLogin (login_msg, login_token);
 		}
 		else
 		{
-			acceptLogin (login_msg, login_token);
+			AcceptLogin (login_msg, login_token);
 
 /* save token for closing the session. */
 			login_token_ = &login_token;
@@ -281,7 +279,7 @@ usagi::client_t::processLoginRequest (
  *     accepted a particular login.
  */
 bool
-usagi::client_t::rejectLogin (
+usagi::client_t::RejectLogin (
 	const rfa::message::ReqMsg& login_msg,
 	rfa::sessionLayer::RequestToken& login_token
 	)
@@ -289,20 +287,23 @@ usagi::client_t::rejectLogin (
 	VLOG(2) << prefix_ << "Sending MMT_LOGIN rejection.";
 
 /* 7.5.9.1 Create a response message (4.2.2) */
-	rfa::message::RespMsg response;
+	auto& response = provider_.response_;
+	response.clear();
 /* 7.5.9.2 Set the message model type of the response. */
 	response.setMsgModelType (rfa::rdm::MMT_LOGIN);
 /* 7.5.9.3 Set response type.  RDM 3.2.2 RespMsg: Status when rejecting login. */
 	response.setRespType (rfa::message::RespMsg::StatusEnum);
 
 /* 7.5.9.5 Create or re-use a request attribute object (4.2.4) */
-	rfa::message::AttribInfo attribInfo;
+	auto& attribInfo = provider_.attribInfo_;
+	attribInfo.clear();
 /* RDM 3.2.4 AttribInfo: Name is required, NameType is recommended: default is USER_NAME (1) */
 	attribInfo.setNameType (login_msg.getAttribInfo().getNameType());
 	attribInfo.setName (login_msg.getAttribInfo().getName());
 	response.setAttribInfo (attribInfo);
 
-	rfa::common::RespStatus status;
+	auto& status = provider_.status_;
+	status.clear();
 /* Item interaction state: RDM 3.2.2 RespMsg: Closed or ClosedRecover. */
 	status.setStreamState (rfa::common::RespStatus::ClosedEnum);
 /* Data quality state: RDM 3.2.2 RespMsg: Suspect. */
@@ -331,7 +332,7 @@ usagi::client_t::rejectLogin (
 			" }";
 	}
 
-	submit (static_cast<rfa::common::Msg&> (response), login_token, nullptr);
+	Submit (response, login_token, nullptr);
 	cumulative_stats_[CLIENT_PC_MMT_LOGIN_REJECTED]++;
 	return true;
 }
@@ -346,7 +347,7 @@ usagi::client_t::rejectLogin (
  * NB: There can only be one login per client session.
  */
 bool
-usagi::client_t::acceptLogin (
+usagi::client_t::AcceptLogin (
 	const rfa::message::ReqMsg& login_msg,
 	rfa::sessionLayer::RequestToken& login_token
 	)
@@ -354,7 +355,8 @@ usagi::client_t::acceptLogin (
 	VLOG(2) << prefix_ << "Sending MMT_LOGIN accepted.";
 
 /* 7.5.9.1 Create a response message (4.2.2) */
-	rfa::message::RespMsg response;
+	auto& response = provider_.response_;
+	response.clear();
 /* 7.5.9.2 Set the message model type of the response. */
 	response.setMsgModelType (rfa::rdm::MMT_LOGIN);
 /* 7.5.9.3 Set response type.  RDM 3.2.2 RespMsg: Refresh when accepting login. */
@@ -362,16 +364,22 @@ usagi::client_t::acceptLogin (
 	response.setIndicationMask (rfa::message::RespMsg::RefreshCompleteFlag);
 
 /* 7.5.9.5 Create or re-use a request attribute object (4.2.4) */
-	rfa::message::AttribInfo attribInfo;
+	auto& attribInfo = provider_.attribInfo_;
+	attribInfo.clear();
 /* RDM 3.2.4 AttribInfo: Name is required, NameType is recommended: default is USER_NAME (1) */
 	attribInfo.setNameType (login_msg.getAttribInfo().getNameType());
 	attribInfo.setName (login_msg.getAttribInfo().getName());
+
+	auto& elementList = provider_.elementList_;
+	elementList.setAssociatedMetaInfo (GetRwfMajorVersion(), GetRwfMinorVersion());
+/* Clear required for SingleWriteIterator state machine. */
+	auto& it = provider_.element_it_;
+	DCHECK (it.isInitialized());
+	it.clear();
+	it.start (elementList);
+
 /* RDM 3.3.2 Login Response Elements */
-	rfa::data::ElementList el;
-	rfa::data::ElementListWriteIterator it;
-	rfa::data::ElementEntry entry;
-	rfa::data::DataBuffer dataBuffer;
-	it.start (el);
+	rfa::data::ElementEntry entry (false);
 /* Reflect back DACS authentication parameters. */
 	if (login_msg.getAttribInfo().getHintMask() & rfa::message::AttribInfo::AttribFlag)
 	{
@@ -379,24 +387,20 @@ usagi::client_t::acceptLogin (
 	}
 /* Images and & updates could be stale. */
 	entry.setName (rfa::rdm::ENAME_ALLOW_SUSPECT_DATA);
-	dataBuffer.setUInt (1);
-	entry.setData (dataBuffer);
 	it.bind (entry);
+	it.setUInt (1);
 /* No permission expressions. */
 	entry.setName (rfa::rdm::ENAME_PROV_PERM_EXP);
-	dataBuffer.setUInt (0);
-	entry.setData (dataBuffer);
 	it.bind (entry);
+	it.setUInt (0);
 /* No permission profile. */
 	entry.setName (rfa::rdm::ENAME_PROV_PERM_PROF);
-	dataBuffer.setUInt (0);
-	entry.setData (dataBuffer);
 	it.bind (entry);
+	it.setUInt (0);
 /* Downstream application drives stream recovery. */
 	entry.setName (rfa::rdm::ENAME_SINGLE_OPEN);
-	dataBuffer.setUInt (0);
-	entry.setData (dataBuffer);
 	it.bind (entry);
+	it.setUInt (0);
 /* Batch requests not supported. */
 /* OMM posts not supported. */
 /* Optimized pause and resume not supported. */
@@ -404,10 +408,11 @@ usagi::client_t::acceptLogin (
 /* Warm standby not supported. */
 /* Binding complete. */
 	it.complete();
-	attribInfo.setAttrib (el);
+	attribInfo.setAttrib (elementList);
 	response.setAttribInfo (attribInfo);
 
-	rfa::common::RespStatus status;
+	auto& status = provider_.status_;
+	status.clear();
 /* Item interaction state: RDM 3.2.2 RespMsg: Open. */
 	status.setStreamState (rfa::common::RespStatus::OpenEnum);
 /* Data quality state: RDM 3.2.2 RespMsg: Ok. */
@@ -436,7 +441,7 @@ usagi::client_t::acceptLogin (
 			" }";
 	}
 
-	submit (static_cast<rfa::common::Msg&> (response), login_token, nullptr);
+	Submit (response, login_token, nullptr);
 	cumulative_stats_[CLIENT_PC_MMT_LOGIN_ACCEPTED]++;
 	return true;
 }
@@ -446,7 +451,7 @@ usagi::client_t::acceptLogin (
  * restrictions. Pause request is not supported.
  */
 void
-usagi::client_t::processDirectoryRequest (
+usagi::client_t::OnDirectoryRequest (
 	const rfa::message::ReqMsg& request_msg,
 	rfa::sessionLayer::RequestToken& request_token
 	)
@@ -503,25 +508,25 @@ usagi::client_t::processDirectoryRequest (
 		if (0 != (request_msg.getAttribInfo().getHintMask() & rfa::message::AttribInfo::ServiceNameFlag))
 		{
 			const char* service_name = request_msg.getAttribInfo().getServiceName().c_str();
-			sendDirectoryResponse (request_token, service_name, filter_mask);
+			SendDirectoryResponse (request_token, service_name, filter_mask);
 		}
 /* Provides ServiceID */
 		else if (0 != (request_msg.getAttribInfo().getHintMask() & rfa::message::AttribInfo::ServiceIDFlag) &&
-			0 != provider_.getServiceId() /* service id is unknown */)
+			0 != provider_.GetServiceId() /* service id is unknown */)
 		{
 			const uint32_t service_id = request_msg.getAttribInfo().getServiceID();
-			if (service_id == provider_.getServiceId()) {
-				sendDirectoryResponse (request_token, provider_.getServiceName(), filter_mask);
+			if (service_id == provider_.GetServiceId()) {
+				SendDirectoryResponse (request_token, provider_.GetServiceName(), filter_mask);
 			} else {
 /* default to full directory if id does not match */
 				LOG(WARNING) << prefix_ << "Received MMT_DIRECTORY request for unknown service id #" << service_id << ", returning entire directory.";
-				sendDirectoryResponse (request_token, nullptr, filter_mask);
+				SendDirectoryResponse (request_token, nullptr, filter_mask);
 			}
 		}
 /* Provide all services directory. */
 		else
 		{
-			sendDirectoryResponse (request_token, nullptr, filter_mask);
+			SendDirectoryResponse (request_token, nullptr, filter_mask);
 		}
 /* ignore any error */
 	} catch (rfa::common::InvalidUsageException& e) {
@@ -533,7 +538,7 @@ usagi::client_t::processDirectoryRequest (
 }
 
 void
-usagi::client_t::processDictionaryRequest (
+usagi::client_t::OnDictionaryRequest (
 	const rfa::message::ReqMsg&	request_msg,
 	rfa::sessionLayer::RequestToken& request_token
 	)
@@ -543,7 +548,7 @@ usagi::client_t::processDictionaryRequest (
 }
 
 void
-usagi::client_t::processItemRequest (
+usagi::client_t::OnItemRequest (
 	const rfa::message::ReqMsg&	request_msg,
 	rfa::sessionLayer::RequestToken& request_token
 	)
@@ -576,7 +581,7 @@ usagi::client_t::processItemRequest (
 		if (!is_logged_in_) {
 			cumulative_stats_[CLIENT_PC_ITEM_REQUEST_REJECTED]++;
 			LOG(INFO) << prefix_ << "Closing request for client without accepted login.";
-			sendClose (request_token, service_id, model_type, item_name, use_attribinfo_in_updates, rfa::common::RespStatus::NotAuthorizedEnum);
+			SendClose (request_token, service_id, model_type, item_name, use_attribinfo_in_updates, rfa::common::RespStatus::NotAuthorizedEnum);
 			return;
 		}
 
@@ -585,7 +590,7 @@ usagi::client_t::processItemRequest (
 		{
 			cumulative_stats_[CLIENT_PC_ITEM_REQUEST_MALFORMED]++;
 			LOG(INFO) << prefix_ << "Closing request for unsupported message model type.";
-			sendClose (request_token, service_id, model_type, item_name, use_attribinfo_in_updates, rfa::common::RespStatus::NotAuthorizedEnum);
+			SendClose (request_token, service_id, model_type, item_name, use_attribinfo_in_updates, rfa::common::RespStatus::NotAuthorizedEnum);
 			return;
 		}
 
@@ -621,7 +626,7 @@ usagi::client_t::processItemRequest (
 /* invalid. */
 				cumulative_stats_[CLIENT_PC_ITEM_REQUEST_MALFORMED]++;
 				LOG(INFO) << prefix_ << "Closing open request on invalid snapshot reissue request.";
-				sendClose (request_token, service_id, model_type, item_name, use_attribinfo_in_updates, rfa::common::RespStatus::NotAuthorizedEnum);
+				SendClose (request_token, service_id, model_type, item_name, use_attribinfo_in_updates, rfa::common::RespStatus::NotAuthorizedEnum);
 			}
 			else
 			{
@@ -631,29 +636,33 @@ usagi::client_t::processItemRequest (
  */
 				cumulative_stats_[CLIENT_PC_ITEM_REISSUE_REQUEST_RECEIVED]++;
 				LOG(INFO) << prefix_ << "Sending refresh on reissue request.";
-				provider::Request request;
-				zmq_msg_t msg;
+				auto& request = provider_.request_;
+				auto& msg = provider_.msg_;
 				request.set_msg_type (provider::Request::MSG_REFRESH);
 				request.mutable_refresh()->set_token ((uintptr_t)&request_token);
 				request.mutable_refresh()->set_service_id (service_id);
 				request.mutable_refresh()->set_model_type (model_type);
 				request.mutable_refresh()->set_item_name (item_name, item_name_len);
-				request.mutable_refresh()->set_rwf_major_version (rwf_major_version_);
-				request.mutable_refresh()->set_rwf_minor_version (rwf_minor_version_);
-				zmq_msg_init_size (&msg, request.ByteSize());
+				request.mutable_refresh()->set_rwf_major_version (GetRwfMajorVersion());
+				request.mutable_refresh()->set_rwf_minor_version (GetRwfMinorVersion());
+				int rc = zmq_msg_init_size (&msg, request.ByteSize());
+				CHECK(0 == rc);
 				request.SerializeToArray (zmq_msg_data (&msg), (int)zmq_msg_size (&msg));
-				zmq_send (sender_.get(), &msg, 0);
-				zmq_msg_close (&msg);
+				auto sock = provider_.request_sock_.get();
+				rc = zmq_send (sock, &msg, 0);
+				CHECK(0 == rc);
+				rc = zmq_msg_close (&msg);
+				CHECK(0 == rc);
 			}
 		}
 		else
 		{
 /* capture ServiceID */
-			if (0 == provider_.getServiceId()
-			    && 0 == request_msg.getAttribInfo().getServiceName().compareCase (provider_.getServiceName()))
+			if (0 == provider_.GetServiceId()
+			    && 0 == request_msg.getAttribInfo().getServiceName().compareCase (provider_.GetServiceName()))
 			{
-				LOG(INFO) << prefix_ << "Detected service id #" << service_id << " for \"" << provider_.getServiceName() << "\".";
-				provider_.setServiceId (service_id);
+				LOG(INFO) << prefix_ << "Detected service id #" << service_id << " for \"" << provider_.GetServiceName() << "\".";
+				provider_.SetServiceId (service_id);
 			}
 
 /* new request. */
@@ -668,7 +677,7 @@ usagi::client_t::processItemRequest (
 /* closest equivalent to not-supported is NotAuthorizedEnum. */
 				cumulative_stats_[CLIENT_PC_ITEM_REQUEST_MALFORMED]++;
 				LOG(INFO) << prefix_ << "Closing unsupported snapshot request.";
-				sendClose (request_token, service_id, model_type, item_name, use_attribinfo_in_updates, rfa::common::RespStatus::NotAuthorizedEnum);
+				SendClose (request_token, service_id, model_type, item_name, use_attribinfo_in_updates, rfa::common::RespStatus::NotAuthorizedEnum);
 			}
 			else
 			{
@@ -678,7 +687,7 @@ usagi::client_t::processItemRequest (
 				if (it == provider_.directory_.end()) {
 					cumulative_stats_[CLIENT_PC_ITEM_NOT_FOUND]++;
 					LOG(INFO) << prefix_ << "Closing request for item not found in directory.";
-					sendClose (request_token, service_id, model_type, item_name, use_attribinfo_in_updates, rfa::common::RespStatus::NotFoundEnum);
+					SendClose (request_token, service_id, model_type, item_name, use_attribinfo_in_updates, rfa::common::RespStatus::NotFoundEnum);
 					return;
 				}
 				LOG(INFO) << prefix_ << "Sending refresh on request.";
@@ -692,19 +701,23 @@ usagi::client_t::processItemRequest (
 				provider_.requests_.emplace (std::make_pair (&request_token, client_request));
 				stream->requests.emplace (std::make_pair (&request_token, client_request));
 /* forward request to worker pool */
-				provider::Request request;
-				zmq_msg_t msg;
+				auto& request = provider_.request_;
+				auto& msg = provider_.msg_;
 				request.set_msg_type (provider::Request::MSG_REFRESH);
-				request.mutable_refresh()->set_token ((uintptr_t)&request_token);
+				request.mutable_refresh()->set_token (reinterpret_cast<uintptr_t> (&request_token));
 				request.mutable_refresh()->set_service_id (service_id);
 				request.mutable_refresh()->set_model_type (model_type);
 				request.mutable_refresh()->set_item_name (item_name, item_name_len);
-				request.mutable_refresh()->set_rwf_major_version (rwf_major_version_);
-				request.mutable_refresh()->set_rwf_minor_version (rwf_minor_version_);
-				zmq_msg_init_size (&msg, request.ByteSize());
+				request.mutable_refresh()->set_rwf_major_version (GetRwfMajorVersion());
+				request.mutable_refresh()->set_rwf_minor_version (GetRwfMinorVersion());
+				int rc = zmq_msg_init_size (&msg, request.ByteSize());
+				CHECK(0 == rc);
 				request.SerializeToArray (zmq_msg_data (&msg), (int)zmq_msg_size (&msg));
-				zmq_send (sender_.get(), &msg, 0);
-				zmq_msg_close (&msg);
+				auto sock = provider_.request_sock_.get();
+				rc = zmq_send (sock, &msg, 0);
+				CHECK(0 == rc);
+				rc = zmq_msg_close (&msg);
+				CHECK(0 == rc);
 			}
 		}
 /* ignore any error */
@@ -726,7 +739,7 @@ usagi::client_t::processItemRequest (
  * and its associated request tokens.
  */
 void
-usagi::client_t::processOMMInactiveClientSessionEvent (
+usagi::client_t::OnOMMInactiveClientSessionEvent (
 	const rfa::sessionLayer::OMMInactiveClientSessionEvent& session_event
 	)
 {
@@ -751,7 +764,7 @@ usagi::client_t::processOMMInactiveClientSessionEvent (
 			VLOG(2) << prefix_ << sp->rfa_name;
 		});
 /* forward upstream to remove reference to this. */
-		provider_.eraseClientSession (handle_);
+		provider_.EraseClientSession (handle_);
 /* handle is now invalid. */
 		handle_ = nullptr;
 /* ignore any error */
@@ -769,7 +782,7 @@ usagi::client_t::processOMMInactiveClientSessionEvent (
  * responsibility of the Provider to encode and supply the directory.
  */
 bool
-usagi::client_t::sendDirectoryResponse (
+usagi::client_t::SendDirectoryResponse (
 	rfa::sessionLayer::RequestToken& request_token,
 	const char* service_name,
 	uint32_t filter_mask
@@ -778,8 +791,9 @@ usagi::client_t::sendDirectoryResponse (
 	VLOG(2) << prefix_ << "Sending directory response.";
 
 /* 7.5.9.1 Create a response message (4.2.2) */
-	rfa::message::RespMsg response;
-	provider_.getDirectoryResponse (&response, rwf_major_version_, rwf_minor_version_, service_name, filter_mask, rfa::rdm::REFRESH_SOLICITED);
+	auto& response = provider_.response_;
+	response.clear();
+	provider_.GetDirectoryResponse (&response, GetRwfMajorVersion(), GetRwfMinorVersion(), service_name, filter_mask, rfa::rdm::REFRESH_SOLICITED);
 
 /* 4.2.8 Message Validation.  RFA provides an interface to verify that
  * constructed messages of these types conform to the Reuters Domain
@@ -802,13 +816,13 @@ usagi::client_t::sendDirectoryResponse (
 	}
 
 /* Create and throw away first token for MMT_DIRECTORY. */
-	submit (static_cast<rfa::common::Msg&> (response), request_token, nullptr);
+	Submit (response, request_token, nullptr);
 	cumulative_stats_[CLIENT_PC_MMT_DIRECTORY_SENT]++;
 	return true;
 }
 
 bool
-usagi::client_t::sendClose (
+usagi::client_t::SendClose (
 	rfa::sessionLayer::RequestToken& request_token,
 	uint32_t service_id,
 	uint8_t model_type,
@@ -826,8 +840,8 @@ usagi::client_t::sendClose (
 		", \"StatusCode\": " << (int)status_code <<
 		" }";
 /* 7.5.9.1 Create a response message (4.2.2) */
-	rfa::message::RespMsg response (false);	/* reference */
-
+	auto& response = provider_.response_;
+	response.clear();
 /* 7.5.9.2 Set the message model type of the response. */
 	response.setMsgModelType (model_type);
 /* 7.5.9.3 Set response type. */
@@ -839,7 +853,8 @@ usagi::client_t::sendClose (
  */
 	if (use_attribinfo_in_updates) {
 /* 7.5.9.5 Create or re-use a request attribute object (4.2.4) */
-		rfa::message::AttribInfo attribInfo;
+		auto& attribInfo = provider_.attribInfo_;
+		attribInfo.clear();
 		attribInfo.setNameType (rfa::rdm::INSTRUMENT_NAME_RIC);
 		const RFA_String name (name_c, 0, false);	/* reference */
 		attribInfo.setServiceID (service_id);
@@ -847,7 +862,8 @@ usagi::client_t::sendClose (
 		response.setAttribInfo (attribInfo);
 	}
 	
-	rfa::common::RespStatus status;
+	auto& status = provider_.status_;
+	status.clear();
 /* Item interaction state: Open, Closed, ClosedRecover, Redirected, NonStreaming, or Unspecified. */
 	status.setStreamState (rfa::common::RespStatus::ClosedEnum);
 /* Data quality state: Ok, Suspect, or Unspecified. */
@@ -878,7 +894,7 @@ usagi::client_t::sendClose (
 	}
 #endif
 
-	submit (static_cast<rfa::common::Msg&> (response), request_token, nullptr);	
+	Submit (response, request_token, nullptr);	
 	cumulative_stats_[CLIENT_PC_ITEM_CLOSED]++;
 	return true;
 }
@@ -886,13 +902,13 @@ usagi::client_t::sendClose (
 /* Forward submit requests to containing provider.
  */
 uint32_t
-usagi::client_t::submit (
-	rfa::common::Msg& msg,
+usagi::client_t::Submit (
+	rfa::message::RespMsg& response,
 	rfa::sessionLayer::RequestToken& token,
 	void* closure
 	)
 {
-	return provider_.submit (msg, token, closure);
+	return provider_.Submit (static_cast<rfa::common::Msg&> (response), token, closure);
 }
 
 /* eof */

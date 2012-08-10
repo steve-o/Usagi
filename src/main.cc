@@ -91,7 +91,7 @@ main (
 	timecaps_t timecaps (1 /* ms */);
 
 	usagi::usagi_t usagi;
-	return usagi.run();
+	return usagi.Run();
 }
 
 /* eof */

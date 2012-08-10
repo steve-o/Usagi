@@ -104,7 +104,7 @@ usagi::rfa_t::~rfa_t()
 }
 
 bool
-usagi::rfa_t::init()
+usagi::rfa_t::Init()
 {
 	VLOG(2) << "Initializing RFA.";
 	rfa::common::Context::initialize();

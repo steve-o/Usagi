@@ -80,43 +80,43 @@ namespace usagi
 		client_t (provider_t& provider, const rfa::common::Handle* handle);
 		~client_t();
 
-		bool getAssociatedMetaInfo();
+		bool GetAssociatedMetaInfo();
 
 /* RFA event callback. */
-		void processEvent (const rfa::common::Event& event);
+		void processEvent (const rfa::common::Event& event) override;
 
-		bool init (rfa::common::Handle*const handle, std::shared_ptr<void> sender);
-		rfa::common::Handle*const getHandle() const {
+		bool Init (rfa::common::Handle*const handle);
+		rfa::common::Handle*const GetHandle() const {
 			return handle_;
 		}
-		uint8_t getRwfMajorVersion() const {
+		uint8_t GetRwfMajorVersion() const {
 			return rwf_major_version_;
 		}
-		uint8_t getRwfMinorVersion() const {
+		uint8_t GetRwfMinorVersion() const {
 			return rwf_minor_version_;
 		}
 
 	private:
-		void processOMMSolicitedItemEvent (const rfa::sessionLayer::OMMSolicitedItemEvent& event);
-		void processReqMsg (const rfa::message::ReqMsg& msg, rfa::sessionLayer::RequestToken& token);
-		void processLoginRequest (const rfa::message::ReqMsg& msg, rfa::sessionLayer::RequestToken& token);
-		void processDirectoryRequest (const rfa::message::ReqMsg& msg, rfa::sessionLayer::RequestToken& token);
-		void processDictionaryRequest (const rfa::message::ReqMsg& msg, rfa::sessionLayer::RequestToken& token);
-		void processItemRequest (const rfa::message::ReqMsg& msg, rfa::sessionLayer::RequestToken& token);
-		void processOMMItemEvent (const rfa::sessionLayer::OMMItemEvent& event);
-                void processRespMsg (const rfa::message::RespMsg& msg);
-                void processLoginResponse (const rfa::message::RespMsg& msg);
-                void processLoginSuccess (const rfa::message::RespMsg& msg);
-                void processLoginSuspect (const rfa::message::RespMsg& msg);
-                void processLoginClosed (const rfa::message::RespMsg& msg);
-		void processOMMInactiveClientSessionEvent (const rfa::sessionLayer::OMMInactiveClientSessionEvent& event);
+		void OnOMMSolicitedItemEvent (const rfa::sessionLayer::OMMSolicitedItemEvent& event);
+		void OnReqMsg (const rfa::message::ReqMsg& msg, rfa::sessionLayer::RequestToken& token);
+		void OnLoginRequest (const rfa::message::ReqMsg& msg, rfa::sessionLayer::RequestToken& token);
+		void OnDirectoryRequest (const rfa::message::ReqMsg& msg, rfa::sessionLayer::RequestToken& token);
+		void OnDictionaryRequest (const rfa::message::ReqMsg& msg, rfa::sessionLayer::RequestToken& token);
+		void OnItemRequest (const rfa::message::ReqMsg& msg, rfa::sessionLayer::RequestToken& token);
+		void OnOMMItemEvent (const rfa::sessionLayer::OMMItemEvent& event);
+                void OnRespMsg (const rfa::message::RespMsg& msg);
+                void OnLoginResponse (const rfa::message::RespMsg& msg);
+                void OnLoginSuccess (const rfa::message::RespMsg& msg);
+                void OnLoginSuspect (const rfa::message::RespMsg& msg);
+                void OnLoginClosed (const rfa::message::RespMsg& msg);
+		void OnOMMInactiveClientSessionEvent (const rfa::sessionLayer::OMMInactiveClientSessionEvent& event);
 
-		bool rejectLogin (const rfa::message::ReqMsg& msg, rfa::sessionLayer::RequestToken& login_token);
-		bool acceptLogin (const rfa::message::ReqMsg& msg, rfa::sessionLayer::RequestToken& login_token);
-		bool sendDirectoryResponse (rfa::sessionLayer::RequestToken& token, const char* service_name, uint32_t filter_mask);
-		bool sendClose (rfa::sessionLayer::RequestToken& token, uint32_t service_id, uint8_t model_type, const char* name, bool use_attribinfo_in_updates, uint8_t status_code);
+		bool RejectLogin (const rfa::message::ReqMsg& msg, rfa::sessionLayer::RequestToken& login_token);
+		bool AcceptLogin (const rfa::message::ReqMsg& msg, rfa::sessionLayer::RequestToken& login_token);
+		bool SendDirectoryResponse (rfa::sessionLayer::RequestToken& token, const char* service_name, uint32_t filter_mask);
+		bool SendClose (rfa::sessionLayer::RequestToken& token, uint32_t service_id, uint8_t model_type, const char* name, bool use_attribinfo_in_updates, uint8_t status_code);
 
-		uint32_t submit (rfa::common::Msg& msg, rfa::sessionLayer::RequestToken& token, void* closure) throw (rfa::common::InvalidUsageException);
+		uint32_t Submit (rfa::message::RespMsg& msg, rfa::sessionLayer::RequestToken& token, void* closure) throw (rfa::common::InvalidUsageException);
 
 		provider_t& provider_;
 
@@ -136,18 +136,9 @@ namespace usagi
 		uint8_t rwf_major_version_;
 		uint8_t rwf_minor_version_;
 
-/* RFA will return a CmdError message if the provider application submits data
- * before receiving a login success message.  Mute downstream publishing until
- * permission is granted to submit data.
- */
-		bool is_muted_;
-
 /* Item requests may appear before login success has been granted.
  */
 		bool is_logged_in_;
-
-/* RFA request thread client. */
-		std::shared_ptr<void> sender_;
 
 		friend provider_t;
 

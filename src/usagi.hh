@@ -63,7 +63,7 @@ namespace usagi
 	class time_base_t
 	{
 	public:
-		virtual bool processTimer (const boost::chrono::time_point<Clock, Duration>& t) = 0;
+		virtual bool OnTimer (const boost::chrono::time_point<Clock, Duration>& t) = 0;
 	};
 
 	template<class Clock, class Duration = typename Clock::duration>
@@ -83,7 +83,7 @@ namespace usagi
 			try {
 				while (true) {
 					boost::this_thread::sleep_until (due_time_);
-					if (!cb_->processTimer (due_time_))
+					if (!cb_->OnTimer (due_time_))
 						break;
 					due_time_ += td_;
 				}
@@ -103,25 +103,25 @@ namespace usagi
 		boost::noncopyable
 	{
 	public:
-		usagi_t() : response_ (false), fields_ (false), attribInfo_ (false) {}
+		usagi_t();
 		~usagi_t();
 
 /* Run the provider with the given command-line parameters.
  * Returns the error code to be returned by main().
  */
-		int run();
-		void clear();
+		int Run();
+		void Clear();
 
 /* Configured period timer entry point. */
-		bool processTimer (const boost::chrono::time_point<boost::chrono::system_clock>& t) override;
+		bool OnTimer (const boost::chrono::time_point<boost::chrono::system_clock>& t) override;
 
 	private:
 
 /* Run core event loop. */
-		void mainLoop();
+		void MainLoop();
 
 /* Broadcast out message. */
-		bool sendRefresh() throw (rfa::common::InvalidUsageException);
+		bool SendRefresh() throw (rfa::common::InvalidUsageException);
 
 /* Application configuration. */
 		config_t config_;
@@ -157,12 +157,12 @@ namespace usagi
 /* RFA request thread workers. */
 		std::forward_list<std::pair<std::shared_ptr<worker_t>, std::shared_ptr<boost::thread>>> workers_;
 
-/* thread worker shutdown socket. */
+/* Thread worker shutdown socket. */
 		std::shared_ptr<void> zmq_context_;
 		std::shared_ptr<void> worker_abort_sock_;
 
-/* response socket for sending images. */
-		std::shared_ptr<void> sender_, receiver_;
+/* Response socket. */
+		std::shared_ptr<void> response_sock_;
 	};
 
 } /* namespace usagi */

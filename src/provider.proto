@@ -15,3 +15,13 @@ message Request {
 		required uint32 rwf_minor_version = 8;
 	}
 }
+
+message Response {
+	enum MsgType {
+		MSG_INITIAL = 0;
+		MSG_UPDATE = 1;
+	}
+	required MsgType msg_type = 1;
+	required uint64 token = 2;
+	required bytes encoded_buffer = 3;
+}

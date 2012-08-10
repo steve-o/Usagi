@@ -10,9 +10,6 @@
 
 #include <windows.h>
 
-/* ZeroMQ messaging middleware. */
-#include <zmq.h>
-
 #include "chromium/logging.hh"
 #include "error.hh"
 #include "rfaostream.hh"
@@ -43,11 +40,13 @@ usagi::provider_t::provider_t (
 	error_item_handle_ (nullptr),
 	min_rwf_version_ (0),
 	service_id_ (0),
+	response_ (false),	/* reference */
+	array_ (false),		/* reference */
+	elementList_ (false),	/* reference */
 	map_ (false),		/* reference */
 	attribInfo_ (false),	/* reference */
 	is_accepting_connections_ (true),
 	is_accepting_requests_ (true),
-	is_muted_ (false),
 	zmq_context_ (zmq_context)
 {
 	ZeroMemory (cumulative_stats_, sizeof (cumulative_stats_));
@@ -56,6 +55,7 @@ usagi::provider_t::provider_t (
 
 usagi::provider_t::~provider_t()
 {
+/* clients */
 	VLOG(3) << "Unregistering " << clients_.size() << " RFA session clients.";
 	std::for_each (clients_.begin(), clients_.end(),
 		[&](std::pair<rfa::common::Handle*const, std::shared_ptr<client_t>>& client)
@@ -64,10 +64,19 @@ usagi::provider_t::~provider_t()
 		omm_provider_->unregisterClient (client.first);
 		client.second.reset();
 	});
+/* 0mq context */
+	CHECK (request_sock_.use_count() <= 1);
+	request_sock_.reset();
+	CHECK (response_sock_.use_count() <= 1);
+	response_sock_.reset();
+	zmq_context_.reset();
+/* RFA handles */
 	if (nullptr != error_item_handle_)
 		omm_provider_->unregisterClient (error_item_handle_), error_item_handle_ = nullptr;
 	omm_provider_.reset();
 	session_.reset();
+	event_queue_.reset();
+	rfa_.reset();
 /* Summary output */
 	using namespace boost::posix_time;
 	auto uptime = second_clock::universal_time() - creation_time_;
@@ -82,7 +91,7 @@ usagi::provider_t::~provider_t()
 }
 
 bool
-usagi::provider_t::init()
+usagi::provider_t::Init()
 {
 	last_activity_ = boost::posix_time::second_clock::universal_time();
 
@@ -102,8 +111,10 @@ usagi::provider_t::init()
 
 /* Pre-allocate memory buffer for payload iterator */
 	CHECK (config_.maximum_data_size > 0);
-	single_write_it_.initialize (map_, (uint32_t)config_.maximum_data_size);
-	CHECK (single_write_it_.isInitialized());
+	map_it_.initialize (map_, (uint32_t)config_.maximum_data_size);
+	CHECK (map_it_.isInitialized());
+	element_it_.initialize (elementList_, (uint32_t)config_.maximum_data_size);
+	CHECK (element_it_.isInitialized());
 
 /* 7.4.5 Initializing an OMM Interactive Provider. */
 	VLOG(3) << "Creating OMM provider.";
@@ -138,9 +149,14 @@ usagi::provider_t::init()
 /* create new push socket for submitting refresh requests. */
 	try {
 		std::function<int(void*)> zmq_close_deleter = zmq_close;
-		sender_.reset (zmq_socket (zmq_context_.get(), ZMQ_PUSH), zmq_close_deleter);
-		CHECK((bool)sender_);
-		int rc = zmq_bind (sender_.get(), "inproc://usagi/rfa/request");
+		request_sock_.reset (zmq_socket (zmq_context_.get(), ZMQ_PUSH), zmq_close_deleter);
+		CHECK((bool)request_sock_);
+		int rc = zmq_bind (request_sock_.get(), "inproc://usagi/rfa/request");
+		CHECK(0 == rc);
+/* socket for fanning out broadcast images. */
+		response_sock_.reset (zmq_socket (zmq_context_.get(), ZMQ_PUSH), zmq_close_deleter);
+		CHECK((bool)response_sock_);
+		rc = zmq_connect (response_sock_.get(), "inproc://usagi/rfa/response");
 		CHECK(0 == rc);
 	} catch (std::exception& e) {
 		LOG(ERROR) << "ZeroMQ::Exception: { "
@@ -154,7 +170,7 @@ usagi::provider_t::init()
  * the provider state on behalf of the application.
  */
 bool
-usagi::provider_t::createItemStream (
+usagi::provider_t::CreateItemStream (
 	const char* name,
 	std::shared_ptr<item_stream_t> item_stream
 	)
@@ -175,22 +191,37 @@ usagi::provider_t::createItemStream (
  */
 
 bool
-usagi::provider_t::send (
+usagi::provider_t::Send (
 	item_stream_t& stream,
-	rfa::message::RespMsg& msg,
+	rfa::message::RespMsg& response_msg,
 	const rfa::message::AttribInfo& attribInfo
 )
 {
 	unsigned i = 0;
 	boost::shared_lock<boost::shared_mutex> stream_lock (stream.lock);
 	const auto now = boost::posix_time::second_clock::universal_time();
+	const rfa::common::Buffer& buffer = response_msg.getEncodedBuffer();
+	provider::Response response;
+	zmq_msg_t msg;
+
+	response.set_msg_type (provider::Response::MSG_UPDATE);
 /* first iteration without AttribInfo */
 	std::for_each (stream.requests.begin(), stream.requests.end(),
 		[&](std::pair<rfa::sessionLayer::RequestToken*const, std::shared_ptr<request_t>>& request)
 	{
-		if (request.second->is_muted || request.second->use_attribinfo_in_updates)
+		if (!request.second->has_initial_image.load() || request.second->use_attribinfo_in_updates)
 			return;
-		this->send (static_cast<rfa::common::Msg&> (msg), *(request.first), nullptr);
+/* pack into 0mq message. */
+		response.set_token (reinterpret_cast<uintptr_t> (request.first));
+		response.set_encoded_buffer (buffer.c_buf(), buffer.size());
+		int rc = zmq_msg_init_size (&msg, response.ByteSize());
+		CHECK(0 == rc);
+		response.SerializeToArray (zmq_msg_data (&msg), static_cast<int> (zmq_msg_size (&msg)));
+		rc = zmq_send (response_sock_.get(), &msg, 0);
+		CHECK(0 == rc);
+		rc = zmq_msg_close (&msg);
+		CHECK(0 == rc);
+/* update client send statistics. */
 		auto client = request.second->client.lock();
 		if ((bool)client) {
 			client->cumulative_stats_[CLIENT_PC_RFA_MSGS_SENT]++;
@@ -201,13 +232,25 @@ usagi::provider_t::send (
 /* second iteration with AttribInfo */
 	if (i < stream.requests.size())
 	{
-		msg.setAttribInfo (attribInfo);
+		response_msg.setAttribInfo (attribInfo);
+/* re-encode */
+		const rfa::common::Buffer& buffer = response_msg.getEncodedBuffer();
 		std::for_each (stream.requests.begin(), stream.requests.end(),
 		[&](std::pair<rfa::sessionLayer::RequestToken*const, std::shared_ptr<request_t>>& request)
 		{
-			if (request.second->is_muted || !request.second->use_attribinfo_in_updates)
+			if (!request.second->has_initial_image.load() || !request.second->use_attribinfo_in_updates)
 				return;
-			this->send (static_cast<rfa::common::Msg&> (msg), *(request.first), nullptr);
+/* pack into 0mq message. */
+			response.set_token (reinterpret_cast<uintptr_t> (request.first));
+			response.set_encoded_buffer (buffer.c_buf(), buffer.size());
+			int rc = zmq_msg_init_size (&msg, response.ByteSize());
+			CHECK(0 == rc);
+			response.SerializeToArray (zmq_msg_data (&msg), static_cast<int> (zmq_msg_size (&msg)));
+			rc = zmq_send (response_sock_.get(), &msg, 0);
+			CHECK(0 == rc);
+			rc = zmq_msg_close (&msg);
+			CHECK(0 == rc);
+/* update client send statistics. */
 			auto client = request.second->client.lock();
 			if ((bool)client) {
 				client->cumulative_stats_[CLIENT_PC_RFA_MSGS_SENT]++;
@@ -224,7 +267,7 @@ usagi::provider_t::send (
 /* Send an Rfa initial image to a single client.
  */
 bool
-usagi::provider_t::send (
+usagi::provider_t::SendReply (
 	rfa::message::RespMsg& msg,
 	rfa::sessionLayer::RequestToken& token
 	)
@@ -246,33 +289,18 @@ usagi::provider_t::send (
 /* lock updates for this stream */
 	boost::unique_lock<boost::shared_mutex> stream_lock (stream->lock);
 /* forward refresh image */
-	send (static_cast<rfa::common::Msg&> (msg), token, nullptr);
+	Submit (static_cast<rfa::common::Msg&> (msg), token, nullptr);
 	cumulative_stats_[PROVIDER_PC_MSGS_SENT]++;
 	client->cumulative_stats_[CLIENT_PC_RFA_MSGS_SENT]++;
 	client->last_activity_ = last_activity_ = boost::posix_time::second_clock::universal_time();
-/* enable updates for this request */
-	request->is_muted = false;
 /* unlock */
 	return true;
-}
-
-uint32_t
-usagi::provider_t::send (
-	rfa::common::Msg& msg,
-	rfa::sessionLayer::RequestToken& token,
-	void* closure
-	)
-{
-	if (is_muted_)
-		return false;
-
-	return submit (msg, token, closure);
 }
 
 /* 7.4.8 Sending response messages using an OMM provider.
  */
 uint32_t
-usagi::provider_t::submit (
+usagi::provider_t::Submit (
 	rfa::common::Msg& msg,
 	rfa::sessionLayer::RequestToken& token,
 	void* closure
@@ -302,15 +330,15 @@ usagi::provider_t::processEvent (
 	cumulative_stats_[PROVIDER_PC_RFA_EVENTS_RECEIVED]++;
 	switch (event_.getType()) {
 	case rfa::sessionLayer::ConnectionEventEnum:
-		processConnectionEvent(static_cast<const rfa::sessionLayer::ConnectionEvent&>(event_));
+		OnConnectionEvent(static_cast<const rfa::sessionLayer::ConnectionEvent&>(event_));
 		break;
 
 	case rfa::sessionLayer::OMMActiveClientSessionEventEnum:
-		processOMMActiveClientSessionEvent(static_cast<const rfa::sessionLayer::OMMActiveClientSessionEvent&>(event_));
+		OnOMMActiveClientSessionEvent(static_cast<const rfa::sessionLayer::OMMActiveClientSessionEvent&>(event_));
 		break;
 
         case rfa::sessionLayer::OMMCmdErrorEventEnum:
-                processOMMCmdErrorEvent (static_cast<const rfa::sessionLayer::OMMCmdErrorEvent&>(event_));
+                OnOMMCmdErrorEvent (static_cast<const rfa::sessionLayer::OMMCmdErrorEvent&>(event_));
                 break;
 
         default:
@@ -323,7 +351,7 @@ usagi::provider_t::processEvent (
 /* 7.4.7.4 Handling Listener Connection Events (new connection events).
  */
 void
-usagi::provider_t::processConnectionEvent (
+usagi::provider_t::OnConnectionEvent (
 	const rfa::sessionLayer::ConnectionEvent& connection_event
 	)
 {
@@ -336,16 +364,16 @@ usagi::provider_t::processConnectionEvent (
  * example, it might have a maximum supported number of connections.
  */
 void
-usagi::provider_t::processOMMActiveClientSessionEvent (
+usagi::provider_t::OnOMMActiveClientSessionEvent (
 	const rfa::sessionLayer::OMMActiveClientSessionEvent& session_event
 	)
 {
 	cumulative_stats_[PROVIDER_PC_OMM_ACTIVE_CLIENT_SESSION_RECEIVED]++;
 	try {
 		if (!is_accepting_connections_ || clients_.size() == config_.session_capacity)
-			rejectClientSession (session_event.getClientSessionHandle());
+			RejectClientSession (session_event.getClientSessionHandle());
 		else
-			acceptClientSession (session_event.getClientSessionHandle());
+			AcceptClientSession (session_event.getClientSessionHandle());
 /* ignore any error */
 	} catch (rfa::common::InvalidUsageException& e) {
 		cumulative_stats_[PROVIDER_PC_OMM_ACTIVE_CLIENT_SESSION_EXCEPTION]++;
@@ -356,7 +384,7 @@ usagi::provider_t::processOMMActiveClientSessionEvent (
 }
 
 bool
-usagi::provider_t::rejectClientSession (
+usagi::provider_t::RejectClientSession (
 	const rfa::common::Handle* handle
 	)
 {
@@ -376,7 +404,7 @@ usagi::provider_t::rejectClientSession (
 }
 
 bool
-usagi::provider_t::acceptClientSession (
+usagi::provider_t::AcceptClientSession (
 	const rfa::common::Handle* handle
 	)
 {
@@ -392,28 +420,28 @@ usagi::provider_t::acceptClientSession (
 	auto registered_handle = omm_provider_->registerClient (event_queue_.get(), &ommClientSessionIntSpec, *static_cast<rfa::common::Client*> (client.get()), nullptr /* closure */);
 	if (nullptr == registered_handle)
 		return false;
-	if (!client->init (registered_handle, sender_))
+	if (!client->Init (registered_handle))
 		return false;
-	if (!client->getAssociatedMetaInfo()) {
+	if (!client->GetAssociatedMetaInfo()) {
 		omm_provider_->unregisterClient (registered_handle);
 		return false;
 	}
 
 /* Determine lowest common Reuters Wire Format (RWF) version */
-	const uint16_t client_rwf_version = (client->getRwfMajorVersion() * 256) + client->getRwfMinorVersion();
+	const uint16_t client_rwf_version = (client->GetRwfMajorVersion() * 256) + client->GetRwfMinorVersion();
 	if (0 == min_rwf_version_)
 	{
 		LOG(INFO) << "Setting RWF: { "
-				  "\"MajorVersion\": " << (unsigned)client->getRwfMajorVersion() <<
-				", \"MinorVersion\": " << (unsigned)client->getRwfMinorVersion() <<
+				  "\"MajorVersion\": " << (unsigned)client->GetRwfMajorVersion() <<
+				", \"MinorVersion\": " << (unsigned)client->GetRwfMinorVersion() <<
 				" }";
 		min_rwf_version_.store (client_rwf_version);
 	}
 	else if (min_rwf_version_ > client_rwf_version)
 	{
 		LOG(INFO) << "Degrading RWF: { "
-				  "\"MajorVersion\": " << (unsigned)client->getRwfMajorVersion() <<
-				", \"MinorVersion\": " << (unsigned)client->getRwfMinorVersion() <<
+				  "\"MajorVersion\": " << (unsigned)client->GetRwfMajorVersion() <<
+				", \"MinorVersion\": " << (unsigned)client->GetRwfMinorVersion() <<
 				" }";
 		min_rwf_version_.store (client_rwf_version);
 	}
@@ -425,7 +453,7 @@ usagi::provider_t::acceptClientSession (
 }
 
 bool
-usagi::provider_t::eraseClientSession (
+usagi::provider_t::EraseClientSession (
 	rfa::common::Handle* handle
 	)
 {
@@ -456,7 +484,7 @@ usagi::provider_t::eraseClientSession (
  * availability of the service.
  */
 void
-usagi::provider_t::getDirectoryResponse (
+usagi::provider_t::GetDirectoryResponse (
 	rfa::message::RespMsg* response,
 	uint8_t rwf_major_version,
 	uint8_t rwf_minor_version,
@@ -504,7 +532,9 @@ usagi::provider_t::getDirectoryResponse (
  */
 // not std::map :(  derived from rfa::common::Data
 	map_.clear();
-	getServiceDirectory (&map_, rwf_major_version, rwf_minor_version, service_name, filter_mask);
+	DCHECK (map_it_.isInitialized());
+	map_it_.clear();
+	GetServiceDirectory (&map_, &map_it_, rwf_major_version, rwf_minor_version, service_name, filter_mask);
 	response->setPayload (map_);
 
 	status_.clear();
@@ -520,8 +550,9 @@ usagi::provider_t::getDirectoryResponse (
 /* Populate map with service directory, must be cleared before call.
  */
 void
-usagi::provider_t::getServiceDirectory (
+usagi::provider_t::GetServiceDirectory (
 	rfa::data::Map* map,
+	rfa::data::SingleWriteIterator* it,
 	uint8_t rwf_major_version,
 	uint8_t rwf_minor_version,
 	const char* service_name,
@@ -540,96 +571,91 @@ usagi::provider_t::getServiceDirectory (
 		return;
 	}
 
-/* Clear required for SingleWriteIterator state machine. */
-	auto& it = single_write_it_;
-	DCHECK (it.isInitialized());
-	it.clear();
-
 /* One service. */
 	map->setTotalCountHint (1);
 	map->setIndicationMask (rfa::data::Map::EntriesFlag);
 
-	it.start (*map, rfa::data::FilterListEnum);
+/* Clear required for SingleWriteIterator state machine. */
+	DCHECK (it->isInitialized());
+	it->start (map_, rfa::data::FilterListEnum);
 
 	rfa::data::MapEntry mapEntry (false);
 	rfa::data::DataBuffer dataBuffer (false);
-	rfa::data::FilterList filterList (false);
-
 /* Service name -> service filter list */
 	mapEntry.setAction (rfa::data::MapEntry::Add);
+/* iterator does not support direct writing for MapEntry value. */
 	dataBuffer.setFromString (serviceName, rfa::data::DataBuffer::StringAsciiEnum);
 	mapEntry.setKeyData (dataBuffer);
-	it.bind (mapEntry);
-	getServiceFilterList (&filterList, rwf_major_version, rwf_minor_version, filter_mask);
+	it->bind (mapEntry);
 
-	it.complete();
+	GetServiceFilterList (it, rwf_major_version, rwf_minor_version, filter_mask);
+
+	it->complete();
 }
 
 void
-usagi::provider_t::getServiceFilterList (
-	rfa::data::FilterList* filterList,
+usagi::provider_t::GetServiceFilterList (
+	rfa::data::SingleWriteIterator* it,
 	uint8_t rwf_major_version,
 	uint8_t rwf_minor_version,
 	uint32_t filter_mask
 	)
 {
-/* 5.3.8 Encoding with a SingleWriteIterator
- * Re-use of SingleWriteIterator permitted cross MapEntry and FieldList.
- */
-	auto& it = single_write_it_;
-	rfa::data::FilterEntry filterEntry (false);
-	rfa::data::ElementList elementList (false);
-
-	filterList->setAssociatedMetaInfo (rwf_major_version, rwf_minor_version);
-	filterEntry.setAction (rfa::data::FilterEntry::Set);
-
 /* Determine entry count for encoder hinting */
 	const bool use_info_filter  = (0 != (filter_mask & rfa::rdm::SERVICE_INFO_FILTER));
 	const bool use_state_filter = (0 != (filter_mask & rfa::rdm::SERVICE_STATE_FILTER));
 	const unsigned filter_count = (use_info_filter ? 1 : 0) + (use_state_filter ? 1 : 0);
-	filterList->setTotalCountHint (filter_count);
+	
+/* 5.3.8 Encoding with a SingleWriteIterator
+ * Re-use of SingleWriteIterator permitted cross MapEntry and FieldList.
+ */
+	filterList_.setAssociatedMetaInfo (rwf_major_version, rwf_minor_version);
 
-	it.start (*filterList, rfa::data::ElementListEnum);  
+	DCHECK (it->isInitialized());
+	it->start (filterList_, rfa::data::ElementListEnum);  
+
+	rfa::data::FilterEntry filterEntry (false);
+	filterEntry.setAction (rfa::data::FilterEntry::Set);
+	filterList_.setTotalCountHint (filter_count);
 
 	if (use_info_filter) {
 		filterEntry.setFilterId (rfa::rdm::SERVICE_INFO_ID);
-		it.bind (filterEntry, rfa::data::ElementListEnum);
-		getServiceInformation (&elementList, rwf_major_version, rwf_minor_version);
+		it->bind (filterEntry, rfa::data::ElementListEnum);
+		GetServiceInformation (it, rwf_major_version, rwf_minor_version);
 	}
 	if (use_state_filter) {
 		filterEntry.setFilterId (rfa::rdm::SERVICE_STATE_ID);
-		it.bind (filterEntry, rfa::data::ElementListEnum);
-		getServiceState (&elementList, rwf_major_version, rwf_minor_version);
+		it->bind (filterEntry, rfa::data::ElementListEnum);
+		GetServiceState (it, rwf_major_version, rwf_minor_version);
 	}
 
-	it.complete();
+	it->complete();
 }
 
 /* SERVICE_INFO_ID
  * Information about a service that does not update very often.
  */
 void
-usagi::provider_t::getServiceInformation (
-	rfa::data::ElementList* elementList,
+usagi::provider_t::GetServiceInformation (
+	rfa::data::SingleWriteIterator* it,
 	uint8_t rwf_major_version,
 	uint8_t rwf_minor_version
 	)
 {
-	auto& it = single_write_it_;
+	elementList_.setAssociatedMetaInfo (rwf_major_version, rwf_minor_version);
+
+	DCHECK (it->isInitialized());
+	it->start (elementList_);
+
 	rfa::data::ElementEntry element (false);
-	rfa::data::Array array_ (false);
-
-	elementList->setAssociatedMetaInfo (rwf_major_version, rwf_minor_version);
-	it.start (*elementList);
-
 /* Name<AsciiString>
  * Service name. This will match the concrete service name or the service group
  * name that is in the Map.Key.
  */
 	element.setName (rfa::rdm::ENAME_NAME);
-	it.bind (element);
+	it->bind (element);
 	const RFA_String serviceName (config_.service_name.c_str(), 0, false);
-	it.setString (serviceName, rfa::data::DataBuffer::StringAsciiEnum);
+	it->setString (serviceName, rfa::data::DataBuffer::StringAsciiEnum);
 	
 /* Capabilities<Array of UInt>
  * Array of valid MessageModelTypes that the service can provide. The UInt
@@ -639,8 +665,8 @@ usagi::provider_t::getServiceInformation (
  * service if the MessageModelType of the request is listed in this element.
  */
 	element.setName (rfa::rdm::ENAME_CAPABILITIES);
-	it.bind (element);
-	getServiceCapabilities (&array_);
+	it->bind (element);
+	GetServiceCapabilities (it);
 
 /* DictionariesUsed<Array of AsciiString>
  * List of Dictionary names that may be required to process all of the data 
@@ -648,69 +674,67 @@ usagi::provider_t::getServiceInformation (
  * the needs of the consumer (e.g. display application, caching application)
  */
 	element.setName (rfa::rdm::ENAME_DICTIONARYS_USED);
-	it.bind (element);
-	getServiceDictionaries (&array_);
+	it->bind (element);
+	GetServiceDictionaries (it);
 
-	it.complete();
+	it->complete();
 }
 
 /* Array of valid MessageModelTypes that the service can provide.
  * rfa::data::Array does not require version tagging according to examples.
  */
 void
-usagi::provider_t::getServiceCapabilities (
-	rfa::data::Array* capabilities
+usagi::provider_t::GetServiceCapabilities (
+	rfa::data::SingleWriteIterator* it
 	)
 {
-	auto& it = single_write_it_;
+	DCHECK (it->isInitialized());
+	it->start (array_, rfa::data::DataBuffer::UIntEnum);
+
 	rfa::data::ArrayEntry arrayEntry (false);
-
-	it.start (*capabilities, rfa::data::DataBuffer::UIntEnum);
-
 /* MarketPrice = 6 */
-	it.bind (arrayEntry);
-	it.setUInt (rfa::rdm::MMT_MARKET_PRICE);
+	it->bind (arrayEntry);
+	it->setUInt (rfa::rdm::MMT_MARKET_PRICE);
 
-	it.complete();
+	it->complete();
 }
 
 void
-usagi::provider_t::getServiceDictionaries (
-	rfa::data::Array* dictionaries
+usagi::provider_t::GetServiceDictionaries (
+	rfa::data::SingleWriteIterator* it
 	)
 {
-	auto& it = single_write_it_;
+	DCHECK (it->isInitialized());
+	it->start (array_, rfa::data::DataBuffer::StringAsciiEnum);
+
 	rfa::data::ArrayEntry arrayEntry (false);
-
-	it.start (*dictionaries, rfa::data::DataBuffer::StringAsciiEnum);
-
 /* RDM Field Dictionary */
-	it.bind (arrayEntry);
-	it.setString (kRdmFieldDictionaryName, rfa::data::DataBuffer::StringAsciiEnum);
+	it->bind (arrayEntry);
+	it->setString (kRdmFieldDictionaryName, rfa::data::DataBuffer::StringAsciiEnum);
 
 /* Enumerated Type Dictionary */
-	it.bind (arrayEntry);
-	it.setString (kEnumTypeDictionaryName, rfa::data::DataBuffer::StringAsciiEnum);
+	it->bind (arrayEntry);
+	it->setString (kEnumTypeDictionaryName, rfa::data::DataBuffer::StringAsciiEnum);
 
-	it.complete();
+	it->complete();
 }
 
 /* SERVICE_STATE_ID
  * State of a service.
  */
 void
-usagi::provider_t::getServiceState (
-	rfa::data::ElementList* elementList,
+usagi::provider_t::GetServiceState (
+	rfa::data::SingleWriteIterator* it,
 	uint8_t rwf_major_version,
 	uint8_t rwf_minor_version
 	)
 {
-	auto& it = single_write_it_;
+	elementList_.setAssociatedMetaInfo (rwf_major_version, rwf_minor_version);
+
+	DCHECK (it->isInitialized());
+	it->start (elementList_);
+
 	rfa::data::ElementEntry element (false);
-
-	elementList->setAssociatedMetaInfo (rwf_major_version, rwf_minor_version);
-	it.start (*elementList);
-
 /* ServiceState<UInt>
  * 1: Up/Yes
  * 0: Down/No
@@ -718,8 +742,8 @@ usagi::provider_t::getServiceState (
  * existing streams are left unchanged.
  */
 	element.setName (rfa::rdm::ENAME_SVC_STATE);
-	it.bind (element);
-	it.setUInt (1);
+	it->bind (element);
+	it->setUInt (1);
 
 /* AcceptingRequests<UInt>
  * 1: Yes
@@ -730,10 +754,10 @@ usagi::provider_t::getServiceState (
  * existing streams are left unchanged.
  */
 	element.setName (rfa::rdm::ENAME_ACCEPTING_REQS);
-	it.bind (element);
-	it.setUInt (is_accepting_requests_ ? 1 : 0);
+	it->bind (element);
+	it->setUInt (is_accepting_requests_ ? 1 : 0);
 
-	it.complete();
+	it->complete();
 }
 
 /* 7.5.8.2 Handling CmdError Events.
@@ -743,7 +767,7 @@ usagi::provider_t::getServiceState (
  * failed.
  */
 void
-usagi::provider_t::processOMMCmdErrorEvent (
+usagi::provider_t::OnOMMCmdErrorEvent (
 	const rfa::sessionLayer::OMMCmdErrorEvent& error
 	)
 {

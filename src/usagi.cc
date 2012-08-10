@@ -38,52 +38,62 @@ static SOCKET g_abort_sock = INVALID_SOCKET;
 class usagi::worker_t
 {
 public:
-	worker_t (std::shared_ptr<provider_t> provider, const config_t& config, std::shared_ptr<void>& context, unsigned id) :
+	worker_t (std::shared_ptr<provider_t> provider, const config_t& config, std::shared_ptr<void>& zmq_context, unsigned id) :
 		id_ (id),
-		context_ (context),
-		response_ (false),	/* reference */
+		zmq_context_ (zmq_context),
+		response_msg_ (false),	/* reference */
 		fields_ (false),
 		attribInfo_ (false),
 		provider_ (provider),
 		config_ (config)
 	{
+/* constants */
+		response_.set_msg_type (provider::Response::MSG_INITIAL);
+
 /* Set logger ID */
 		std::ostringstream ss;
 		ss << "Worker " << std::hex << std::setiosflags (std::ios_base::showbase) << id << ':';
 		prefix_.assign (ss.str());
 	}
 
+	~worker_t()
+	{
+		CHECK (request_sock_.use_count() <= 1);
+		request_sock_.reset();
+		CHECK (response_sock_.use_count() <= 1);
+		response_sock_.reset();
+		zmq_context_.reset();
+	}
+
 	void operator()()
 	{
-		provider::Request request;
-
 		Init();
 		LOG(INFO) << prefix_ << "Accepting requests.";
 
 		while (true)
 		{
-			if (!GetRequest (&request))
+			if (!GetRequest (&request_))
 				continue;
-			if (request.msg_type() == provider::Request::MSG_ABORT) {
+			if (request_.msg_type() == provider::Request::MSG_ABORT) {
 				LOG(INFO) << prefix_ << "Received interrupt request.";
 				break;
 			}
-			if (!(request.msg_type() == provider::Request::MSG_REFRESH
-				&& request.has_refresh()))
+			if (!(request_.msg_type() == provider::Request::MSG_REFRESH
+				&& request_.has_refresh()))
 			{
 				LOG(ERROR) << prefix_ << "Received unknown request.";
 				continue;
 			}
-			VLOG(1) << prefix_ << "Received request \"" << request.refresh().item_name() << "\"";
-			DVLOG(1) << prefix_ << request.DebugString();
+			VLOG(1) << prefix_ << "Received request \"" << request_.refresh().item_name() << "\"";
+			DVLOG(1) << prefix_ << request_.DebugString();
 
 			try {
-				ProcessRequest (*reinterpret_cast<rfa::sessionLayer::RequestToken*> ((uintptr_t)request.refresh().token()),
-						request.refresh().service_id(),
-						request.refresh().model_type(),
-						request.refresh().item_name().c_str(),
-						request.refresh().rwf_major_version(),
-						request.refresh().rwf_minor_version());
+				OnRequest (*reinterpret_cast<rfa::sessionLayer::RequestToken*> ((uintptr_t)request_.refresh().token()),
+					   request_.refresh().service_id(),
+					   request_.refresh().model_type(),
+					   request_.refresh().item_name().c_str(),
+					   request_.refresh().rwf_major_version(),
+					   request_.refresh().rwf_minor_version());
 			} catch (std::exception& e) {
 				LOG(ERROR) << prefix_ << "ProcessRequest::Exception: { "
 					"\"What\": \"" << e.what() << "\""
@@ -104,17 +114,17 @@ protected:
 
 		try {
 /* Setup 0mq sockets */
-			receiver_.reset (zmq_socket (context_.get(), ZMQ_PULL), zmq_close_deleter);
-			CHECK((bool)receiver_);
-			rc = zmq_connect (receiver_.get(), "inproc://usagi/rfa/request");
+			request_sock_.reset (zmq_socket (zmq_context_.get(), ZMQ_PULL), zmq_close_deleter);
+			CHECK((bool)request_sock_);
+			rc = zmq_connect (request_sock_.get(), "inproc://usagi/rfa/request");
 			CHECK(0 == rc);
 /* Also bind for terminating interrupt. */
-			rc = zmq_connect (receiver_.get(), "inproc://usagi/worker/abort");
+			rc = zmq_connect (request_sock_.get(), "inproc://usagi/worker/abort");
 			CHECK(0 == rc);
 /* Response image socket */
-			sender_.reset (zmq_socket (context_.get(), ZMQ_PUSH), zmq_close_deleter);
-			CHECK((bool)receiver_);
-			rc = zmq_connect (sender_.get(), "inproc://usagi/rfa/response");
+			response_sock_.reset (zmq_socket (zmq_context_.get(), ZMQ_PUSH), zmq_close_deleter);
+			CHECK((bool)response_sock_);
+			rc = zmq_connect (response_sock_.get(), "inproc://usagi/rfa/response");
 			CHECK(0 == rc);
 		} catch (std::exception& e) {
 			LOG(ERROR) << prefix_ << "ZeroMQ::Exception: { "
@@ -126,6 +136,7 @@ protected:
 /* Pre-allocate memory buffer for RFA payload iterator */
 			fields_ = std::make_shared<rfa::data::FieldList> ();
 			CHECK ((bool)fields_);
+			fields_->setInfo (kDictionaryId, kFieldListId);
 
 			CHECK (config_.maximum_data_size > 0);
 			single_write_it_ = std::make_shared<rfa::data::SingleWriteIterator> ();
@@ -148,9 +159,9 @@ protected:
 		rc = zmq_msg_init (&msg_);
 		CHECK(0 == rc);
 		VLOG(1) << prefix_ << "Awaiting new job.";
-		rc = zmq_recv (receiver_.get(), &msg_, 0);
+		rc = zmq_recv (request_sock_.get(), &msg_, 0);
 		CHECK(0 == rc);
-		if (!request->ParseFromArray (zmq_msg_data (&msg_), (int)zmq_msg_size (&msg_))) {
+		if (!request->ParseFromArray (zmq_msg_data (&msg_), static_cast<int> (zmq_msg_size (&msg_)))) {
 			LOG(ERROR) << prefix_ << "Received invalid request.";
 			rc = zmq_msg_close (&msg_);
 			CHECK(0 == rc);
@@ -161,7 +172,7 @@ protected:
 		return true;
 	}
 
-	void ProcessRequest (
+	void OnRequest (
 		rfa::sessionLayer::RequestToken& request_token,
 		uint32_t service_id,
 		uint8_t model_type,
@@ -179,13 +190,13 @@ protected:
 			", \"RwfMinorVersion\": " << (int)rwf_minor_version <<
 			" }";
 /* 7.5.9.1 Create a response message (4.2.2) */
-		response_.clear();
+		response_msg_.clear();
 
 /* 7.5.9.2 Set the message model type of the response. */
-		response_.setMsgModelType (model_type);
+		response_msg_.setMsgModelType (model_type);
 /* 7.5.9.3 Set response type. */
-		response_.setRespType (rfa::message::RespMsg::RefreshEnum);
-		response_.setIndicationMask (rfa::message::RespMsg::RefreshCompleteFlag | rfa::message::RespMsg::DoNotRippleFlag);
+		response_msg_.setRespType (rfa::message::RespMsg::RefreshEnum);
+		response_msg_.setIndicationMask (rfa::message::RespMsg::RefreshCompleteFlag | rfa::message::RespMsg::DoNotRippleFlag);
 
 /* 7.5.9.5 Create or re-use a request attribute object (4.2.4) */
 		attribInfo_.clear();
@@ -193,12 +204,11 @@ protected:
 		RFA_String name (item_name, 0, false);	/* reference */
 		attribInfo_.setServiceID (service_id);
 		attribInfo_.setName (name);
-		response_.setAttribInfo (attribInfo_);
+		response_msg_.setAttribInfo (attribInfo_);
 
 /* 4.3.1 RespMsg.Payload */
 // not std::map :(  derived from rfa::common::Data
 		fields_->setAssociatedMetaInfo (rwf_major_version, rwf_minor_version);
-		fields_->setInfo (kDictionaryId, kFieldListId);
 
 /* Clear required for SingleWriteIterator state machine. */
 		auto& it = *single_write_it_.get();
@@ -213,7 +223,7 @@ protected:
 
 		it.complete();
 /* Set a reference to field list, not a copy */
-		response_.setPayload (*fields_.get());
+		response_msg_.setPayload (*fields_.get());
 
 /** Optional: but require to replace stale values in cache when stale values are supported. **/
 		status_.clear();
@@ -223,7 +233,7 @@ protected:
 		status_.setDataState (rfa::common::RespStatus::OkEnum);
 /* Error code, e.g. NotFound, InvalidArgument, ... */
 		status_.setStatusCode (rfa::common::RespStatus::NoneEnum);
-		response_.setRespStatus (status_);
+		response_msg_.setRespStatus (status_);
 
 #ifdef DEBUG
 /* 4.2.8 Message Validation.  RFA provides an interface to verify that
@@ -244,25 +254,16 @@ protected:
 				" }";
 		}
 #endif
-		int rc;
-		uintptr_t token = reinterpret_cast<uintptr_t> (&request_token);
-		const rfa::common::Buffer& buffer = response_.getEncodedBuffer();
-/* part (a) - token */
-		rc = zmq_msg_init_size (&msg_, sizeof (token));		
+		const rfa::common::Buffer& buffer = response_msg_.getEncodedBuffer();
+		response_.set_token (reinterpret_cast<uintptr_t> (&request_token));
+		response_.set_encoded_buffer (buffer.c_buf(), buffer.size());
+		int rc = zmq_msg_init_size (&msg_, response_.ByteSize());
 		CHECK(0 == rc);
-		memcpy (zmq_msg_data (&msg_), &token, sizeof (token));
-		rc = zmq_send (sender_.get(), &msg_, ZMQ_SNDMORE);
-		CHECK(0 == rc);
-		rc = zmq_msg_close (&msg_);
-		CHECK(0 == rc);
-/* part (b) - encoded buffer */
-		rc = zmq_msg_init_data (&msg_, const_cast<void*> (reinterpret_cast<const void*> (buffer.c_buf())), buffer.size(), nullptr, nullptr);
-		CHECK(0 == rc);
-		rc = zmq_send (sender_.get(), &msg_, 0);
+		response_.SerializeToArray (zmq_msg_data (&msg_), static_cast<int> (zmq_msg_size (&msg_)));
+		rc = zmq_send (response_sock_.get(), &msg_, 0);
 		CHECK(0 == rc);
 		rc = zmq_msg_close (&msg_);
 		CHECK(0 == rc);
-		LOG(INFO) << "Sent update.";
 	}
 	
 /* worker unique identifier */
@@ -270,19 +271,21 @@ protected:
 	std::string prefix_;
 
 /* 0mq context */
-	std::shared_ptr<void> context_;
+	std::shared_ptr<void> zmq_context_;
 
 /* Socket to receive refresh requests on. */
-	std::shared_ptr<void> receiver_;
+	std::shared_ptr<void> request_sock_;
 
 /* response socket for sending images. */
-	std::shared_ptr<void> sender_;
+	std::shared_ptr<void> response_sock_;
 
 /* Incoming 0mq message */
 	zmq_msg_t msg_;
+	provider::Request request_;
 
 /* Outgoing rfa message */
-	rfa::message::RespMsg response_;
+	rfa::message::RespMsg response_msg_;
+	provider::Response response_;
 
 /* Publish fields. */
 	std::shared_ptr<rfa::data::FieldList> fields_;	/* no copy ctor: cannot use unique_ptr */
@@ -297,13 +300,22 @@ protected:
 	const config_t& config_;
 };
 
+usagi::usagi_t::usagi_t()
+	: response_ (false),
+	  fields_ (false),
+	  attribInfo_ (false)
+{
+/* constant across publishes */
+	fields_.setInfo (kDictionaryId, kFieldListId);
+}
+
 usagi::usagi_t::~usagi_t()
 {
 	LOG(INFO) << "fin.";
 }
 
 int
-usagi::usagi_t::run ()
+usagi::usagi_t::Run ()
 {
 	LOG(INFO) << config_;
 
@@ -313,11 +325,11 @@ usagi::usagi_t::run ()
 		zmq_context_.reset (zmq_init (0), zmq_term_deleter);
 		CHECK((bool)zmq_context_);
 
-/* pull for RFA submissions */
+/* pull for RFA responses */
 		std::function<int(void*)> zmq_close_deleter = zmq_close;
-		receiver_.reset (zmq_socket (zmq_context_.get(), ZMQ_PULL), zmq_close_deleter);
-		CHECK((bool)receiver_);
-		int rc = zmq_bind (receiver_.get(), "inproc://usagi/rfa/response");
+		response_sock_.reset (zmq_socket (zmq_context_.get(), ZMQ_PULL), zmq_close_deleter);
+		CHECK((bool)response_sock_);
+		int rc = zmq_bind (response_sock_.get(), "inproc://usagi/rfa/response");
 		CHECK(0 == rc);
 	} catch (std::exception& e) {
 		LOG(ERROR) << "ZeroMQ::Exception: { "
@@ -328,7 +340,7 @@ usagi::usagi_t::run ()
 	try {
 /* RFA context. */
 		rfa_.reset (new rfa_t (config_));
-		if (!(bool)rfa_ || !rfa_->init())
+		if (!(bool)rfa_ || !rfa_->Init())
 			goto cleanup;
 
 /* RFA asynchronous event queue. */
@@ -344,7 +356,7 @@ usagi::usagi_t::run ()
 
 /* RFA provider. */
 		provider_.reset (new provider_t (config_, rfa_, event_queue_, zmq_context_));
-		if (!(bool)provider_ || !provider_->init())
+		if (!(bool)provider_ || !provider_->Init())
 			goto cleanup;
 
 /* Create state for published RIC. */
@@ -352,7 +364,7 @@ usagi::usagi_t::run ()
 		auto stream = std::make_shared<broadcast_stream_t> ();
 		if (!(bool)stream)
 			goto cleanup;
-		if (!provider_->createItemStream (msft.c_str(), stream))
+		if (!provider_->CreateItemStream (msft.c_str(), stream))
 			goto cleanup;
 		msft_stream_ = std::move (stream);
 
@@ -418,13 +430,13 @@ usagi::usagi_t::run ()
 	}
 
 	LOG(INFO) << "Init complete, entering main loop.";
-	mainLoop ();
+	MainLoop ();
 	LOG(INFO) << "Main loop terminated, cleaning up.";
-	clear();
+	Clear();
 	return EXIT_SUCCESS;
 cleanup:
 	LOG(INFO) << "Init failed, cleaning up.";
-	clear();
+	Clear();
 	return EXIT_FAILURE;
 }
 
@@ -468,36 +480,42 @@ CtrlHandler (
 class rfa_dispatcher_t : public rfa::common::DispatchableNotificationClient
 {
 public:
-	rfa_dispatcher_t (std::shared_ptr<void> zmq_context) : context_ (zmq_context) {}
+	rfa_dispatcher_t (std::shared_ptr<void> zmq_context) : zmq_context_ (zmq_context) {}
+	~rfa_dispatcher_t()
+	{
+		CHECK (event_sock_.use_count() <= 1);
+		event_sock_.reset();
+		zmq_context_.reset();
+	}
 
-	int init (void)
+	int Init (void)
 	{
 		std::function<int(void*)> zmq_close_deleter = zmq_close;
-		CHECK((bool)context_);
-		sender_.reset (zmq_socket (context_.get(), ZMQ_PUSH), zmq_close_deleter);
-		CHECK((bool)sender_);
-		return zmq_connect (sender_.get(), "inproc://usagi/rfa/event");
+		CHECK((bool)zmq_context_);
+		event_sock_.reset (zmq_socket (zmq_context_.get(), ZMQ_PUSH), zmq_close_deleter);
+		CHECK((bool)event_sock_);
+		return zmq_connect (event_sock_.get(), "inproc://usagi/rfa/event");
 	}
 
 	void notify (rfa::common::Dispatchable& eventSource, void* closure) override
 	{
-		DCHECK((bool)sender_);
+		DCHECK((bool)event_sock_);
 		int rc = zmq_msg_init_size (&msg_, 0);
 		CHECK(0 == rc);
-		rc = zmq_send (sender_.get(), &msg_, 0);
+		rc = zmq_send (event_sock_.get(), &msg_, 0);
 		CHECK(0 == rc);
 		rc = zmq_msg_close (&msg_);
 		CHECK(0 == rc);
 	}
 
 protected:
-	std::shared_ptr<void> context_;
-	std::shared_ptr<void> sender_;
+	std::shared_ptr<void> zmq_context_;
+	std::shared_ptr<void> event_sock_;
 	zmq_msg_t msg_;
 };
 
 void
-usagi::usagi_t::mainLoop()
+usagi::usagi_t::MainLoop()
 {
 	std::function<int(void*)> zmq_close_deleter = zmq_close;
 	rfa_dispatcher_t dispatcher (zmq_context_);
@@ -505,8 +523,9 @@ usagi::usagi_t::mainLoop()
 	SOCKET s[2];
 	std::shared_ptr<void> event_sock;
 	zmq_msg_t msg;
-	rfa::message::RespMsg response (false);
+	rfa::message::RespMsg response_msg (false);
 	rfa::sessionLayer::RequestToken* request_token;
+	provider::Response response;
 
 /* pull RFA events */
 	event_sock.reset (zmq_socket (zmq_context_.get(), ZMQ_PULL), zmq_close_deleter);
@@ -516,8 +535,8 @@ usagi::usagi_t::mainLoop()
 	items[0].socket = event_sock.get();
 	items[0].events = ZMQ_POLLIN;
 
-/* pull RFA submissions */
-	items[1].socket = receiver_.get();
+/* pull RFA responses */
+	items[1].socket = response_sock_.get();
 	items[1].events = ZMQ_POLLIN;
 
 /* pull abort event */
@@ -575,7 +594,7 @@ usagi::usagi_t::mainLoop()
 	items[2].fd     = s[0];
 	items[2].events = ZMQ_POLLIN;
 
-	rc = dispatcher.init();
+	rc = dispatcher.Init();
 	CHECK(0 == rc);
 	event_queue_->registerNotificationClient (dispatcher, nullptr);
 
@@ -590,43 +609,45 @@ usagi::usagi_t::mainLoop()
 /* #0 - RFA event */
 		if (0 != (items[0].revents & ZMQ_POLLIN))
 			event_queue_->dispatch (rfa::common::Dispatchable::NoWait);
-/* #1 - RFA response */
+/* #1 - RFA response message */
 		if (0 != (items[1].revents & ZMQ_POLLIN))
 		{
-/* part (a) - token */
 			rc = zmq_msg_init (&msg);
 			CHECK(0 == rc);
-			rc = zmq_recv (receiver_.get(), &msg, 0);
+			rc = zmq_recv (items[1].socket, &msg, 0);
 			CHECK(0 == rc);
-			if (logging::DEBUG_MODE) {
-				int64_t more;
-				size_t more_size = sizeof (more);
-				rc = zmq_getsockopt (receiver_.get(), ZMQ_RCVMORE, &more, &more_size);
-				CHECK (rc == 0);
-				CHECK (more == 1);
+			if (!response.ParseFromArray (zmq_msg_data (&msg), static_cast<int> (zmq_msg_size (&msg)))) {
+				LOG(ERROR) << "Received invalid response.";
+				rc = zmq_msg_close (&msg);
+				CHECK(0 == rc);
+				continue;
 			}
-			uintptr_t token = 0;
-			CHECK(sizeof (token) == zmq_msg_size (&msg));
-			memcpy (&token, zmq_msg_data (&msg), sizeof (token));
+
+			DVLOG(1) << response.DebugString();
+/* token */
+			const uintptr_t token = response.token();
 			request_token = reinterpret_cast<rfa::sessionLayer::RequestToken*> (token);
-			rc = zmq_msg_close (&msg);
-			CHECK(0 == rc);
-/* part (b) - encoded buffer */
-			rc = zmq_msg_init (&msg);
-			CHECK(0 == rc);
-			rc = zmq_recv (receiver_.get(), &msg, 0);
-			CHECK(0 == rc);
-			if (logging::DEBUG_MODE) {
-				int64_t more;
-				size_t more_size = sizeof (more);
-				rc = zmq_getsockopt (receiver_.get(), ZMQ_RCVMORE, &more, &more_size);
-				CHECK (rc == 0);
-				CHECK (more == 0);
-			}
-			rfa::common::Buffer buffer (reinterpret_cast<unsigned char*> (zmq_msg_data (&msg)), (int)zmq_msg_size (&msg), (int)zmq_msg_size (&msg), false);
 			try {
-				response.setEncodedBuffer (buffer);
-				provider_->send (response, *request_token);
+				LOG(INFO) << "response size: " << response.encoded_buffer().size();
+/* encoded buffer */
+				rfa::common::Buffer buffer (const_cast<unsigned char*> (reinterpret_cast<const unsigned char*> (response.encoded_buffer().c_str())),
+							    static_cast<int> (response.encoded_buffer().size()),
+							    static_cast<int> (response.encoded_buffer().size()),
+							    false);
+				response_msg.setEncodedBuffer (buffer);
+/* forward to RFA */
+				provider_->Submit (response_msg, *request_token, nullptr);
+				LOG(INFO) << "response sent.";
+				response_msg.clear();
+/* only if successful */
+				if (response.msg_type() == provider::Response::MSG_INITIAL)
+				{
+					auto sp = provider_->GetRequest (request_token);
+					if ((bool)sp) {
+						sp->has_initial_image.store (true);
+						LOG(INFO) << "enabled updates.";
+					}
+				}
 			} catch (rfa::common::InvalidUsageException& e) {
 				LOG(ERROR) << "EncodedBuffer::InvalidUsageException: { " <<
 						"\"StatusText\": \"" << e.getStatus().getStatusText() << "\""
@@ -646,10 +667,13 @@ usagi::usagi_t::mainLoop()
 
 	closesocket (s[0]);
 	closesocket (s[1]);
+
+	CHECK (event_sock.use_count() <= 1);
+	event_sock.reset();
 }
 
 void
-usagi::usagi_t::clear()
+usagi::usagi_t::Clear()
 {
 /* Stop generating new events. */
 	if (timer_thread_) {
@@ -686,30 +710,35 @@ usagi::usagi_t::clear()
 		}
 		LOG(INFO) << "All worker threads joined.";
 	}
-	worker_abort_sock_.reset();
-	sender_.reset();
-	receiver_.reset();
-	zmq_context_.reset();
 
 /* Signal message pump thread to exit. */
-	if ((bool)event_queue_)
+	if ((bool)event_queue_) {
 		event_queue_->deactivate();
+	}
 
 	msft_stream_.reset();
 
-/* Release everything with an RFA dependency. */
-	assert (provider_.use_count() <= 1);
+/* Shutdown final connecting 0mq users before bringing down bound sockets. */
+	CHECK (provider_.use_count() <= 1);
 	provider_.reset();
-	assert (log_.use_count() <= 1);
+	CHECK (worker_abort_sock_.use_count() <= 1);
+	worker_abort_sock_.reset();
+	CHECK (response_sock_.use_count() <= 1);
+	response_sock_.reset();
+/* Bring down 0mq context as all sockets are closed. */
+	CHECK (zmq_context_.use_count() <= 1);
+	zmq_context_.reset();
+/* Release everything with an RFA dependency. */
+	CHECK (log_.use_count() <= 1);
 	log_.reset();
-	assert (event_queue_.use_count() <= 1);
+	CHECK (event_queue_.use_count() <= 1);
 	event_queue_.reset();
-	assert (rfa_.use_count() <= 1);
+	CHECK (rfa_.use_count() <= 1);
 	rfa_.reset();
 }
 
 bool
-usagi::usagi_t::processTimer (
+usagi::usagi_t::OnTimer (
 	const boost::chrono::time_point<boost::chrono::system_clock>& t
 	)
 {
@@ -727,7 +756,7 @@ usagi::usagi_t::processTimer (
 	}
 
 	try {
-		sendRefresh();
+		SendRefresh();
 	} catch (rfa::common::InvalidUsageException& e) {
 		LOG(ERROR) << "InvalidUsageException: { "
 			  "\"Severity\": \"" << severity_string (e.getSeverity()) << "\""
@@ -739,7 +768,7 @@ usagi::usagi_t::processTimer (
 }
 
 bool
-usagi::usagi_t::sendRefresh()
+usagi::usagi_t::SendRefresh()
 {
 /* 7.4.8.1 Create a response message (4.2.2) */
 	response_.clear();
@@ -748,7 +777,7 @@ usagi::usagi_t::sendRefresh()
 	attribInfo_.clear();
 	attribInfo_.setNameType (rfa::rdm::INSTRUMENT_NAME_RIC);
 	attribInfo_.setName (msft_stream_->rfa_name);
-	attribInfo_.setServiceID (provider_->getServiceId());
+	attribInfo_.setServiceID (provider_->GetServiceId());
 
 /* 7.4.8.3 Set the message model type of the response. */
 	response_.setMsgModelType (rfa::rdm::MMT_MARKET_PRICE);
@@ -759,9 +788,8 @@ usagi::usagi_t::sendRefresh()
 
 /* 4.3.1 RespMsg.Payload */
 // not std::map :(  derived from rfa::common::Data
-	const uint16_t rwf_version = provider_->getRwfVersion();
+	const uint16_t rwf_version = provider_->GetRwfVersion();
 	fields_.setAssociatedMetaInfo (rwf_version / 256, rwf_version % 256);
-	fields_.setInfo (kDictionaryId, kFieldListId);
 
 /* Clear required for SingleWriteIterator state machine. */
 	auto& it = single_write_it_;
@@ -797,7 +825,7 @@ usagi::usagi_t::sendRefresh()
 	}
 #endif
 
-	provider_->send (*msft_stream_.get(), response_, attribInfo_);
+	provider_->Send (*msft_stream_.get(), response_, attribInfo_);
 	LOG(INFO) << "Sent refresh.";
 	return true;
 }
