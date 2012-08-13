@@ -3,7 +3,9 @@ package provider;
 message Request {
 	enum MsgType {
 		MSG_ABORT = 0;
-		MSG_REFRESH = 1;
+		MSG_SNAPSHOT = 1;
+		MSG_SUBSCRIPTION = 2;
+		MSG_REFRESH = 3;
 	}
 	required MsgType msg_type = 1;
 	optional group Refresh = 2 {
@@ -18,8 +20,10 @@ message Request {
 
 message Response {
 	enum MsgType {
-		MSG_INITIAL = 0;
-		MSG_UPDATE = 1;
+		MSG_SNAPSHOT = 0;
+		MSG_INITIAL = 1;
+		MSG_UPDATE = 2;
+		MSG_REFRESH = 3;
 	}
 	required MsgType msg_type = 1;
 	required uint64 token = 2;

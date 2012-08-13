@@ -635,7 +635,7 @@ usagi::client_t::OnItemRequest (
  * parameters on an already requested stream.
  */
 				cumulative_stats_[CLIENT_PC_ITEM_REISSUE_REQUEST_RECEIVED]++;
-				LOG(INFO) << prefix_ << "Sending refresh on reissue request.";
+				LOG(INFO) << prefix_ << "Forwarding reissue for \"" << item_name << "\".";
 				auto& request = provider_.request_;
 				auto& msg = provider_.msg_;
 				request.set_msg_type (provider::Request::MSG_REFRESH);
@@ -690,7 +690,7 @@ usagi::client_t::OnItemRequest (
 					SendClose (request_token, service_id, model_type, item_name, use_attribinfo_in_updates, rfa::common::RespStatus::NotFoundEnum);
 					return;
 				}
-				LOG(INFO) << prefix_ << "Sending refresh on request.";
+				LOG(INFO) << prefix_ << "Forwarding request for \"" << item_name << "\".";
 				auto& stream = it->second;
 				DCHECK ((bool)stream);
 				items_.emplace (std::make_pair (&request_token, stream));
@@ -703,7 +703,7 @@ usagi::client_t::OnItemRequest (
 /* forward request to worker pool */
 				auto& request = provider_.request_;
 				auto& msg = provider_.msg_;
-				request.set_msg_type (provider::Request::MSG_REFRESH);
+				request.set_msg_type (provider::Request::MSG_SUBSCRIPTION);
 				request.mutable_refresh()->set_token (reinterpret_cast<uintptr_t> (&request_token));
 				request.mutable_refresh()->set_service_id (service_id);
 				request.mutable_refresh()->set_model_type (model_type);

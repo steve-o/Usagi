@@ -48,7 +48,6 @@ public:
 		config_ (config)
 	{
 /* constants */
-		response_.set_msg_type (provider::Response::MSG_INITIAL);
 
 /* Set logger ID */
 		std::ostringstream ss;
@@ -118,17 +117,26 @@ public:
 		LOG(INFO) << prefix_ << "Accepting requests.";
 		while (true)
 		{
+again:
 			if (!GetRequest (&request_))
 				continue;
 			if (request_.msg_type() == provider::Request::MSG_ABORT) {
 				LOG(INFO) << prefix_ << "Received interrupt request.";
 				break;
 			}
-			if (!(request_.msg_type() == provider::Request::MSG_REFRESH
-				&& request_.has_refresh()))
+			provider::Response_MsgType msg_type;
+			switch (request_.msg_type()) {
+			case provider::Request::MSG_SUBSCRIPTION:
+				msg_type = provider::Response::MSG_INITIAL;
+				break;
+			case provider::Request::MSG_REFRESH:
+				msg_type = provider::Response::MSG_REFRESH;
+				break;
+			default:
 			{
 				LOG(ERROR) << prefix_ << "Received unknown request.";
-				continue;
+				goto again;
+			}
 			}
 			VLOG(1) << prefix_ << "Received request \"" << request_.refresh().item_name() << "\"";
 			DVLOG(1) << prefix_ << request_.DebugString();
@@ -138,6 +146,7 @@ public:
 					   request_.refresh().service_id(),
 					   request_.refresh().model_type(),
 					   request_.refresh().item_name().c_str(),
+					   msg_type,
 					   request_.refresh().rwf_major_version(),
 					   request_.refresh().rwf_minor_version());
 			} catch (std::exception& e) {
@@ -178,6 +187,7 @@ protected:
 		uint32_t service_id,
 		uint8_t model_type,
 		const char* item_name,
+		provider::Response_MsgType msg_type,
 		uint8_t rwf_major_version,
 		uint8_t rwf_minor_version
 		)
@@ -256,6 +266,7 @@ protected:
 		}
 #endif
 		const rfa::common::Buffer& buffer = response_msg_.getEncodedBuffer();
+		response_.set_msg_type (msg_type);
 		response_.set_token (reinterpret_cast<uintptr_t> (&request_token));
 		response_.set_encoded_buffer (buffer.c_buf(), buffer.size());
 		int rc = zmq_msg_init_size (&msg_, response_.ByteSize());
@@ -646,7 +657,7 @@ usagi::usagi_t::MainLoop()
 					auto sp = provider_->GetRequest (request_token);
 					if ((bool)sp) {
 						sp->has_initial_image.store (true);
-						LOG(INFO) << "enabled updates.";
+						LOG(INFO) << "Enabled stream updates.";
 					}
 				}
 			} catch (rfa::common::InvalidUsageException& e) {

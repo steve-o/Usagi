@@ -7,8 +7,8 @@ static const char* kDefaultRsslPort = "14002";
 
 usagi::config_t::config_t() :
 /* default values */
-	service_name ("VTA"),
-	rssl_default_port (kDefaultRsslPort),
+	service_name ("NOCACHE_VTA"),
+	rssl_default_port ("24002"),
 	session_name ("SessionName"),
 	monitor_name ("ApplicationLoggerMonitorName"),
 	event_queue_name ("EventQueueName"),
