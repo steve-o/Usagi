@@ -73,7 +73,6 @@ namespace usagi
  * permission is granted to submit data.
  */
 		boost::atomic_bool has_initial_image;
-
 	};
 
 	class item_stream_t : boost::noncopyable
@@ -185,9 +184,12 @@ namespace usagi
 		rfa::data::Array array_;
 		rfa::data::ElementList elementList_;
 		rfa::data::FilterList filterList_;
-		rfa::data::Map map_;
 		rfa::message::AttribInfo attribInfo_;
 		rfa::common::RespStatus status_;
+/* Client shared resource. */
+		rfa::data::Map map_;
+		zmq_msg_t msg_;
+		provider::Request request_;
 
 /* Iterator for populating publish fields */
 		rfa::data::SingleWriteIterator map_it_, element_it_;
@@ -204,9 +206,6 @@ namespace usagi
 /* RFA request thread client. */
 		std::shared_ptr<void> zmq_context_;
 		std::shared_ptr<void> request_sock_, response_sock_;
-
-		zmq_msg_t msg_;
-		provider::Request request_;
 
 /** Performance Counters **/
 		boost::posix_time::ptime creation_time_, last_activity_;

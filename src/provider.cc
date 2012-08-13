@@ -589,7 +589,6 @@ usagi::provider_t::GetServiceDirectory (
 	dataBuffer.setFromString (serviceName, rfa::data::DataBuffer::StringAsciiEnum);
 	mapEntry.setKeyData (dataBuffer);
 	it->bind (mapEntry);
-
 	GetServiceFilterList (it, rwf_major_version, rwf_minor_version, filter_mask);
 
 	it->complete();
