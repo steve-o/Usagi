@@ -623,7 +623,7 @@ usagi::client_t::OnItemRequest (
 			}
 			else if (!is_streaming_request)
 			{
-/* invalid. */
+/* closest equivalent to not-supported or invalid is NotAuthorizedEnum. */
 				cumulative_stats_[CLIENT_PC_ITEM_REQUEST_MALFORMED]++;
 				LOG(INFO) << prefix_ << "Closing open request on invalid snapshot reissue request.";
 				SendClose (request_token, service_id, model_type, item_name, use_attribinfo_in_updates, rfa::common::RespStatus::NotAuthorizedEnum);
