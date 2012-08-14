@@ -31,7 +31,11 @@
 #include "rfa.hh"
 #include "config.hh"
 #include "deleter.hh"
+
+#pragma warning( push )
+#pragma warning( disable : 4244 4267 )
 #include "provider.pb.h"
+#pragma warning( pop )
 
 namespace usagi
 {
@@ -57,7 +61,7 @@ namespace usagi
 	class request_t : boost::noncopyable
 	{
 	public:
-		request_t (std::shared_ptr<item_stream_t>& item_stream_, std::shared_ptr<client_t>& client_, bool use_attribinfo_in_updates_)
+		request_t (std::shared_ptr<item_stream_t> item_stream_, std::shared_ptr<client_t> client_, bool use_attribinfo_in_updates_)
 			: item_stream (item_stream_),
 			  client (client_),
 			  use_attribinfo_in_updates (use_attribinfo_in_updates_),
@@ -90,6 +94,7 @@ namespace usagi
 	};
 
 	class provider_t :
+		public std::enable_shared_from_this<provider_t>,
 		public rfa::common::Client,
 		boost::noncopyable
 	{
@@ -100,9 +105,8 @@ namespace usagi
 		bool Init() throw (rfa::common::InvalidConfigurationException, rfa::common::InvalidUsageException);
 
 		bool CreateItemStream (const char* name, std::shared_ptr<item_stream_t> item_stream) throw (rfa::common::InvalidUsageException);
-		bool Send (item_stream_t& item_stream, rfa::message::RespMsg& msg, const rfa::message::AttribInfo& attribInfo) throw (rfa::common::InvalidUsageException);
-		bool SendReply (rfa::message::RespMsg& msg, rfa::sessionLayer::RequestToken& token) throw (rfa::common::InvalidUsageException);
-		uint32_t Submit (rfa::common::Msg& msg, rfa::sessionLayer::RequestToken& token, void* closure) throw (rfa::common::InvalidUsageException);
+		bool Send (item_stream_t*const item_stream, rfa::message::RespMsg*const msg, const rfa::message::AttribInfo& attribInfo) throw (rfa::common::InvalidUsageException);
+		uint32_t Submit (rfa::common::Msg*const msg, rfa::sessionLayer::RequestToken*const token, void* closure) throw (rfa::common::InvalidUsageException);
 
 /* RFA event callback. */
 		void processEvent (const rfa::common::Event& event) override;
@@ -128,15 +132,15 @@ namespace usagi
 
 		bool RejectClientSession (const rfa::common::Handle* handle);
 		bool AcceptClientSession (const rfa::common::Handle* handle);
-		bool EraseClientSession (rfa::common::Handle* handle);
+		bool EraseClientSession (rfa::common::Handle*const handle);
 
-		void GetDirectoryResponse (rfa::message::RespMsg* msg, uint8_t rwf_major_version, uint8_t rwf_minor_version, const char* service_name, uint32_t filter_mask, uint8_t response_type);
-		void GetServiceDirectory (rfa::data::Map* map, rfa::data::SingleWriteIterator* it, uint8_t rwf_major_version, uint8_t rwf_minor_version, const char* service_name, uint32_t filter_mask);
-		void GetServiceFilterList (rfa::data::SingleWriteIterator* it, uint8_t rwf_major_version, uint8_t rwf_minor_version, uint32_t filter_mask);
-		void GetServiceInformation (rfa::data::SingleWriteIterator* it, uint8_t rwf_major_version, uint8_t rwf_minor_version);
-		void GetServiceCapabilities (rfa::data::SingleWriteIterator* it);
-		void GetServiceDictionaries (rfa::data::SingleWriteIterator* it);
-		void GetServiceState (rfa::data::SingleWriteIterator* it, uint8_t rwf_major_version, uint8_t rwf_minor_version);
+		void GetDirectoryResponse (rfa::message::RespMsg*const msg, uint8_t rwf_major_version, uint8_t rwf_minor_version, const char* service_name, uint32_t filter_mask, uint8_t response_type);
+		void GetServiceDirectory (rfa::data::Map*const map, rfa::data::SingleWriteIterator*const it, uint8_t rwf_major_version, uint8_t rwf_minor_version, const char* service_name, uint32_t filter_mask);
+		void GetServiceFilterList (rfa::data::SingleWriteIterator*const it, uint8_t rwf_major_version, uint8_t rwf_minor_version, uint32_t filter_mask);
+		void GetServiceInformation (rfa::data::SingleWriteIterator*const it, uint8_t rwf_major_version, uint8_t rwf_minor_version);
+		void GetServiceCapabilities (rfa::data::SingleWriteIterator*const it);
+		void GetServiceDictionaries (rfa::data::SingleWriteIterator*const it);
+		void GetServiceState (rfa::data::SingleWriteIterator*const it, uint8_t rwf_major_version, uint8_t rwf_minor_version);
 
 		void SetServiceId (uint32_t service_id) {
 			service_id_.store (service_id);

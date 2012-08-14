@@ -16,7 +16,11 @@
 #include "error.hh"
 #include "rfa_logging.hh"
 #include "rfaostream.hh"
+
+#pragma warning( push )
+#pragma warning( disable : 4244 4267 )
 #include "provider.pb.h"
+#pragma warning( pop )
 
 /* RDM Usage Guide: Section 6.5: Enterprise Platform
  * For future compatibility, the DictionaryId should be set to 1 by providers.
@@ -38,7 +42,7 @@ static SOCKET g_abort_sock = INVALID_SOCKET;
 class usagi::worker_t
 {
 public:
-	worker_t (std::shared_ptr<provider_t> provider, const config_t& config, std::shared_ptr<void>& zmq_context, unsigned id) :
+	worker_t (std::shared_ptr<provider_t> provider, const config_t& config, std::shared_ptr<void> zmq_context, unsigned id) :
 		id_ (id),
 		zmq_context_ (zmq_context),
 		response_msg_ (false),	/* reference */
@@ -142,7 +146,7 @@ again:
 			DVLOG(1) << prefix_ << request_.DebugString();
 
 			try {
-				OnRequest (*reinterpret_cast<rfa::sessionLayer::RequestToken*> ((uintptr_t)request_.refresh().token()),
+				OnRequest (reinterpret_cast<rfa::sessionLayer::RequestToken*> ((uintptr_t)request_.refresh().token()),
 					   request_.refresh().service_id(),
 					   request_.refresh().model_type(),
 					   request_.refresh().item_name().c_str(),
@@ -162,7 +166,7 @@ again:
 	unsigned GetId() const { return id_; }
 
 protected:
-	bool GetRequest (provider::Request* request)
+	bool GetRequest (provider::Request*const request)
 	{
 		int rc;
 
@@ -183,7 +187,7 @@ protected:
 	}
 
 	void OnRequest (
-		rfa::sessionLayer::RequestToken& request_token,
+		rfa::sessionLayer::RequestToken*const request_token,
 		uint32_t service_id,
 		uint8_t model_type,
 		const char* item_name,
@@ -193,7 +197,7 @@ protected:
 		)
 	{
 		VLOG(2) << "Sending blank response to incoming refresh request: { "
-			  "\"RequestToken\": \"" << (intptr_t)&request_token << "\""
+			  "\"RequestToken\": \"" << request_token << "\""
 			", \"ServiceID\": " << service_id <<
 			", \"MsgModelType\": " << (int)model_type <<
 			", \"Name\": \"" << item_name << "\""
@@ -267,7 +271,7 @@ protected:
 #endif
 		const rfa::common::Buffer& buffer = response_msg_.getEncodedBuffer();
 		response_.set_msg_type (msg_type);
-		response_.set_token (reinterpret_cast<uintptr_t> (&request_token));
+		response_.set_token (reinterpret_cast<uintptr_t> (request_token));
 		response_.set_encoded_buffer (buffer.c_buf(), buffer.size());
 		int rc = zmq_msg_init_size (&msg_, response_.ByteSize());
 		CHECK(0 == rc);
@@ -431,7 +435,7 @@ usagi::usagi_t::Run ()
 		timer_.reset (new time_pump_t<boost::chrono::system_clock> (boost::chrono::system_clock::now(), boost::chrono::seconds (1), this));
 		if (!(bool)timer_)
 			goto cleanup;
-		timer_thread_.reset (new boost::thread (*timer_.get()));
+		timer_thread_.reset (new boost::thread ([this](){ timer_->Run(); }));
 		if (!(bool)timer_thread_)
 			goto cleanup;
 		LOG(INFO) << "Added periodic timer, interval " << boost::chrono::seconds (1).count() << " seconds";
@@ -648,7 +652,7 @@ usagi::usagi_t::MainLoop()
 							    false);
 				response_msg.setEncodedBuffer (buffer);
 /* forward to RFA */
-				provider_->Submit (response_msg, *request_token, nullptr);
+				provider_->Submit (&response_msg, request_token, nullptr);
 				LOG(INFO) << "response sent.";
 				response_msg.clear();
 /* only if successful */
@@ -837,7 +841,7 @@ usagi::usagi_t::SendRefresh()
 	}
 #endif
 
-	provider_->Send (*msft_stream_.get(), response_, attribInfo_);
+	provider_->Send (msft_stream_.get(), &response_, attribInfo_);
 	LOG(INFO) << "Sent refresh.";
 	return true;
 }

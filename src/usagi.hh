@@ -78,7 +78,7 @@ namespace usagi
 			CHECK(nullptr != cb_);
 		}
 
-		void operator()()
+		void Run (void)
 		{
 			try {
 				while (true) {

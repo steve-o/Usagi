@@ -93,6 +93,8 @@ add_definitions(
 
 PROTOBUF_GENERATE_CPP(PROTO_SRCS PROTO_HDRS src/provider.proto)
 
+set_source_files_properties(${PROTO_SRCS} PROPERTIES COMPILE_FLAGS "/W0")
+
 #-----------------------------------------------------------------------------
 # source files
 

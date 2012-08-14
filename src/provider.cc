@@ -172,14 +172,14 @@ usagi::provider_t::Init()
 bool
 usagi::provider_t::CreateItemStream (
 	const char* name,
-	std::shared_ptr<item_stream_t> item_stream
+	std::shared_ptr<item_stream_t> stream
 	)
 {
-	item_stream->rfa_name.set (name, 0, true);
+	stream->rfa_name.set (name, 0, true);
 /* no tokens until subscription appears. */
 	const std::string key (name);
 	boost::unique_lock<boost::shared_mutex> lock (directory_lock_);
-	auto status = directory_.emplace (std::make_pair (key, item_stream));
+	auto status = directory_.emplace (std::make_pair (key, stream));
 	VLOG(4) << "Creating item stream #" << directory_.size() << " for RIC \"" << name << "\".";
 	assert (true == status.second);
 	assert (directory_.end() != directory_.find (key));
@@ -192,13 +192,13 @@ usagi::provider_t::CreateItemStream (
 
 bool
 usagi::provider_t::Send (
-	item_stream_t& stream,
-	rfa::message::RespMsg& response_msg,
+	item_stream_t*const stream,
+	rfa::message::RespMsg*const response_msg,
 	const rfa::message::AttribInfo& attribInfo
 )
 {
 	unsigned i = 0;
-	boost::shared_lock<boost::shared_mutex> stream_lock (stream.lock);
+	boost::shared_lock<boost::shared_mutex> stream_lock (stream->lock);
 	const auto now = boost::posix_time::second_clock::universal_time();
 	provider::Response response;
 	zmq_msg_t msg;
@@ -206,8 +206,8 @@ usagi::provider_t::Send (
 	response.set_msg_type (provider::Response::MSG_UPDATE);
 	{
 /* first iteration without AttribInfo */
-		const rfa::common::Buffer& buffer = response_msg.getEncodedBuffer();
-		std::for_each (stream.requests.begin(), stream.requests.end(),
+		const rfa::common::Buffer& buffer = response_msg->getEncodedBuffer();
+		std::for_each (stream->requests.begin(), stream->requests.end(),
 			[&](std::pair<rfa::sessionLayer::RequestToken*const, std::shared_ptr<request_t>>& request)
 		{
 			if (!request.second->has_initial_image.load() || request.second->use_attribinfo_in_updates)
@@ -231,13 +231,13 @@ usagi::provider_t::Send (
 			++i;
 		});
 	}
-	if (i < stream.requests.size())
+	if (i < stream->requests.size())
 	{
 /* second iteration with AttribInfo */
-		response_msg.setAttribInfo (attribInfo);
+		response_msg->setAttribInfo (attribInfo);
 /* re-encode */
-		const rfa::common::Buffer& buffer = response_msg.getEncodedBuffer();
-		std::for_each (stream.requests.begin(), stream.requests.end(),
+		const rfa::common::Buffer& buffer = response_msg->getEncodedBuffer();
+		std::for_each (stream->requests.begin(), stream->requests.end(),
 		[&](std::pair<rfa::sessionLayer::RequestToken*const, std::shared_ptr<request_t>>& request)
 		{
 			if (!request.second->has_initial_image.load() || !request.second->use_attribinfo_in_updates)
@@ -266,56 +266,23 @@ usagi::provider_t::Send (
 	return true;
 }
 
-/* Send an Rfa initial image to a single client.
- */
-bool
-usagi::provider_t::SendReply (
-	rfa::message::RespMsg& msg,
-	rfa::sessionLayer::RequestToken& token
-	)
-{
-/* find request and iteam stream for the token */
-	boost::shared_lock<boost::shared_mutex> requests_lock (requests_lock_);
-	auto it = requests_.find (&token);
-	if (requests_.end() == it)
-		return false;
-	auto request = it->second.lock();	// weak_ptr for request_t
-	if (!(bool)request)
-		return false;
-	auto stream = request->item_stream.lock();	// weak_ptr for item_stream_t
-	if (!(bool)stream)
-		return false;
-	auto client = request->client.lock();	// weak_ptr for client_t;
-	if (!(bool)client)
-		return false;
-/* lock updates for this stream */
-	boost::unique_lock<boost::shared_mutex> stream_lock (stream->lock);
-/* forward refresh image */
-	Submit (static_cast<rfa::common::Msg&> (msg), token, nullptr);
-	cumulative_stats_[PROVIDER_PC_MSGS_SENT]++;
-	client->cumulative_stats_[CLIENT_PC_RFA_MSGS_SENT]++;
-	client->last_activity_ = last_activity_ = boost::posix_time::second_clock::universal_time();
-/* unlock */
-	return true;
-}
-
 /* 7.4.8 Sending response messages using an OMM provider.
  */
 uint32_t
 usagi::provider_t::Submit (
-	rfa::common::Msg& msg,
-	rfa::sessionLayer::RequestToken& token,
+	rfa::common::Msg*const msg,
+	rfa::sessionLayer::RequestToken*const token,
 	void* closure
 	)
 {
 	rfa::sessionLayer::OMMSolicitedItemCmd itemCmd;
-	itemCmd.setMsg (msg);
+	itemCmd.setMsg (*msg);
 /* 7.5.9.7 Set the unique item identifier. */
-	itemCmd.setRequestToken (token);
+	itemCmd.setRequestToken (*token);
 /* 7.5.9.8 Write the response message directly out to the network through the
  * connection.
  */
-	assert ((bool)omm_provider_);
+	CHECK ((bool)omm_provider_);
 	const uint32_t submit_status = omm_provider_->submit (&itemCmd, closure);
 	cumulative_stats_[PROVIDER_PC_RFA_MSGS_SENT]++;
 	return submit_status;
@@ -412,7 +379,7 @@ usagi::provider_t::AcceptClientSession (
 {
 	VLOG(2) << "Accepting new client session request.";
 
-	auto client = std::make_shared<client_t> (*this, handle);
+	auto client = std::make_shared<client_t> (shared_from_this(), handle);
 	if (!(bool)client)
 		return false;
 
@@ -456,7 +423,7 @@ usagi::provider_t::AcceptClientSession (
 
 bool
 usagi::provider_t::EraseClientSession (
-	rfa::common::Handle* handle
+	rfa::common::Handle*const handle
 	)
 {
 /* unregister RFA client session. */
@@ -487,7 +454,7 @@ usagi::provider_t::EraseClientSession (
  */
 void
 usagi::provider_t::GetDirectoryResponse (
-	rfa::message::RespMsg* response,
+	rfa::message::RespMsg*const response,
 	uint8_t rwf_major_version,
 	uint8_t rwf_minor_version,
 	const char* service_name,
@@ -553,8 +520,8 @@ usagi::provider_t::GetDirectoryResponse (
  */
 void
 usagi::provider_t::GetServiceDirectory (
-	rfa::data::Map* map,
-	rfa::data::SingleWriteIterator* it,
+	rfa::data::Map*const map,
+	rfa::data::SingleWriteIterator*const it,
 	uint8_t rwf_major_version,
 	uint8_t rwf_minor_version,
 	const char* service_name,
@@ -596,7 +563,7 @@ usagi::provider_t::GetServiceDirectory (
 
 void
 usagi::provider_t::GetServiceFilterList (
-	rfa::data::SingleWriteIterator* it,
+	rfa::data::SingleWriteIterator*const it,
 	uint8_t rwf_major_version,
 	uint8_t rwf_minor_version,
 	uint32_t filter_mask
@@ -638,7 +605,7 @@ usagi::provider_t::GetServiceFilterList (
  */
 void
 usagi::provider_t::GetServiceInformation (
-	rfa::data::SingleWriteIterator* it,
+	rfa::data::SingleWriteIterator*const it,
 	uint8_t rwf_major_version,
 	uint8_t rwf_minor_version
 	)
@@ -702,7 +669,7 @@ usagi::provider_t::GetServiceCapabilities (
 
 void
 usagi::provider_t::GetServiceDictionaries (
-	rfa::data::SingleWriteIterator* it
+	rfa::data::SingleWriteIterator*const it
 	)
 {
 	DCHECK (it->isInitialized());
@@ -725,7 +692,7 @@ usagi::provider_t::GetServiceDictionaries (
  */
 void
 usagi::provider_t::GetServiceState (
-	rfa::data::SingleWriteIterator* it,
+	rfa::data::SingleWriteIterator*const it,
 	uint8_t rwf_major_version,
 	uint8_t rwf_minor_version
 	)
