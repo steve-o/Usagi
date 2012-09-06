@@ -35,11 +35,11 @@ set(ZEROMQ_LIBRARIES
 )
 
 # Google Protocol BUffers
-set(PROTOBUF_SRC_ROOT_FOLDER "D:/protobuf-2.4.1")
+set(PROTOBUF_SRC_ROOT_FOLDER "D:/protobuf-2.4.1-vc100-x64")
 find_package (Protobuf REQUIRED)
 
 # Boost headers plus built libraries
-set(BOOST_ROOT D:/boost_1_50_0)
+set(BOOST_ROOT D:/boost_1_51_0)
 set(BOOST_LIBRARYDIR ${BOOST_ROOT}/stage/lib)
 set(Boost_USE_STATIC_LIBS ON)
 find_package (Boost 1.50 COMPONENTS chrono thread REQUIRED)

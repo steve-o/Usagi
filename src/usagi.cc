@@ -118,17 +118,14 @@ public:
 
 	void Run (void)
 	{
+		provider::Response_MsgType msg_type;
 		LOG(INFO) << prefix_ << "Accepting requests.";
 		while (true)
 		{
 again:
 			if (!GetRequest (&request_))
 				continue;
-			if (request_.msg_type() == provider::Request::MSG_ABORT) {
-				LOG(INFO) << prefix_ << "Received interrupt request.";
-				break;
-			}
-			provider::Response_MsgType msg_type;
+			
 			switch (request_.msg_type()) {
 			case provider::Request::MSG_SUBSCRIPTION:
 				msg_type = provider::Response::MSG_INITIAL;
@@ -136,17 +133,18 @@ again:
 			case provider::Request::MSG_REFRESH:
 				msg_type = provider::Response::MSG_REFRESH;
 				break;
+			case provider::Request::MSG_ABORT:
+				LOG(INFO) << prefix_ << "Received interrupt request.";
+				goto close_worker;
 			default:
-			{
 				LOG(ERROR) << prefix_ << "Received unknown request.";
 				goto again;
-			}
 			}
 			VLOG(1) << prefix_ << "Received request \"" << request_.refresh().item_name() << "\"";
 			DVLOG(1) << prefix_ << request_.DebugString();
 
 			try {
-				OnRequest (reinterpret_cast<rfa::sessionLayer::RequestToken*> ((uintptr_t)request_.refresh().token()),
+				OnRequest (reinterpret_cast<rfa::sessionLayer::RequestToken*> (static_cast<uintptr_t> (request_.refresh().token())),
 					   request_.refresh().service_id(),
 					   request_.refresh().model_type(),
 					   request_.refresh().item_name().c_str(),
@@ -160,6 +158,7 @@ again:
 			}
 		}
 
+close_worker:
 		LOG(INFO) << prefix_ << "Worker closed.";
 	}
 
@@ -347,7 +346,7 @@ usagi::usagi_t::Run ()
 		CHECK((bool)response_sock_);
 		int rc = zmq_bind (response_sock_.get(), "inproc://usagi/rfa/response");
 		CHECK(0 == rc);
-	} catch (std::exception& e) {
+	} catch (const std::exception& e) {
 		LOG(ERROR) << "ZeroMQ::Exception: { "
 			"\"What\": \"" << e.what() << "\" }";
 		goto cleanup;
@@ -389,13 +388,13 @@ usagi::usagi_t::Run ()
 		single_write_it_.initialize (fields_, (uint32_t)config_.maximum_data_size);
 		CHECK (single_write_it_.isInitialized());
 
-	} catch (rfa::common::InvalidUsageException& e) {
+	} catch (const rfa::common::InvalidUsageException& e) {
 		LOG(ERROR) << "InvalidUsageException: { "
 			  "\"Severity\": \"" << severity_string (e.getSeverity()) << "\""
 			", \"Classification\": \"" << classification_string (e.getClassification()) << "\""
 			", \"StatusText\": \"" << e.getStatus().getStatusText() << "\" }";
 		goto cleanup;
-	} catch (rfa::common::InvalidConfigurationException& e) {
+	} catch (const rfa::common::InvalidConfigurationException& e) {
 		LOG(ERROR) << "InvalidConfigurationException: { "
 			  "\"Severity\": \"" << severity_string (e.getSeverity()) << "\""
 			", \"Classification\": \"" << classification_string (e.getClassification()) << "\""
@@ -424,7 +423,7 @@ usagi::usagi_t::Run ()
 				goto cleanup;
 			workers_.emplace_front (std::make_pair (worker, thread));
 		}
-	} catch (std::exception& e) {
+	} catch (const std::exception& e) {
 		LOG(ERROR) << "ZeroMQ::Exception: { "
 			"\"What\": \"" << e.what() << "\" }";
 		goto cleanup;
@@ -439,7 +438,7 @@ usagi::usagi_t::Run ()
 		if (!(bool)timer_thread_)
 			goto cleanup;
 		LOG(INFO) << "Added periodic timer, interval " << boost::chrono::seconds (1).count() << " seconds";
-	} catch (std::exception& e) {
+	} catch (const std::exception& e) {
 		LOG(ERROR) << "Timer::Exception: { "
 			"\"What\": \"" << e.what() << "\" }";
 		goto cleanup;
